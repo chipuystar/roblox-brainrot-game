@@ -146,6 +146,38 @@ local rebirthButton = makeButton(buttonColumn, "Rebirth", "REBIRTH", UDim2.fromO
 local upgradeButton = makeButton(buttonColumn, "Upgrade", "UPGRADE", UDim2.fromOffset(188, 48), UDim2.fromOffset(0, 112), Color3.fromRGB(80, 40, 130), Enum.Font.LuckiestGuy, 17)
 local indexButton = makeButton(buttonColumn, "Index", "INDEX (9)", UDim2.fromOffset(188, 48), UDim2.fromOffset(0, 168), Color3.fromRGB(50, 45, 80), Enum.Font.LuckiestGuy, 17)
 
+-- Mobile: the four-button stack covers the right-side touch controls (the
+-- jump button and the camera-drag area), so touch devices get one small
+-- MENU pill instead. The same four buttons live in a compact collapsible
+-- panel below it; tapping any of them fires its action and closes the
+-- panel. On PC (keyboard present) nothing changes: the stack stays exactly
+-- as it is.
+local UserInputService = game:GetService("UserInputService")
+local isTouch = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+if isTouch then
+	-- Compact the four buttons (40 tall, 6 gap) so the panel stays clear
+	-- of the bottom-right jump button even on short landscape screens.
+	local touchButtons = { lockButton, rebirthButton, upgradeButton, indexButton }
+	for i, btn in ipairs(touchButtons) do
+		btn.Size = UDim2.fromOffset(188, 40)
+		btn.Position = UDim2.fromOffset(0, (i - 1) * 46)
+		btn.MouseButton1Click:Connect(function()
+			buttonColumn.Visible = false
+		end)
+	end
+	buttonColumn.Position = UDim2.new(1, -14, 0, 174)
+	buttonColumn.Size = UDim2.fromOffset(188, 178)
+	buttonColumn.BackgroundColor3 = DARK
+	buttonColumn.BackgroundTransparency = 0.25
+	buttonColumn.Visible = false
+	local menuButton = makeButton(gui, "Menu", "MENU", UDim2.fromOffset(90, 36), UDim2.new(1, -14, 0, 130), DARK2, Enum.Font.LuckiestGuy, 16)
+	menuButton.AnchorPoint = Vector2.new(1, 0)
+	addStroke(menuButton, GOLD, 2)
+	menuButton.MouseButton1Click:Connect(function()
+		buttonColumn.Visible = not buttonColumn.Visible
+	end)
+end
+
 -- Carried / hint bar, bottom-centre.
 local carriedBar = Instance.new("Frame")
 carriedBar.Name = "CarriedBar"
