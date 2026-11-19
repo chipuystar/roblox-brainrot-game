@@ -1,92 +1,97 @@
--- Pasar Brainrot: rebirths and upgrades.
--- A rebirth resets cash for a permanent +25% income multiplier and a new
--- title; placed brainrots and upgrades stay. Upgrades buy walk speed, a
--- second pair of hands (carry 2) and more $/second.
-
-local RebirthService = {}
+-- RebirthService.luau
+-- The long ladder: rebirths and upgrades. A rebirth needs a lifetime
+-- earnings total; it resets cash to the rebirth amount, grants a title and a
+-- permanent +25% income multiplier, and keeps everything placed and every
+-- upgrade bought. Upgrades are bought one level at a time with cash.
 
 local Config = require(script.Parent.Config)
 local MoneyService = require(script.Parent.MoneyService)
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Notify = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Notify")
 
-function RebirthService.getNextRebirth(player)
-	local data = MoneyService.getData(player)
-	if not data then
-		return nil
+local RebirthService = {}
+
+-- Set the character's walk speed from the saved speed level. Called when an
+-- upgrade is bought and again whenever the character respawns.
+function RebirthService.applyWalkSpeed(player)
+	local state = MoneyService.get(player)
+	if not state then
+		return
 	end
-	return Config.REBIRTHS[data.rebirths + 1]
-end
-
-local function getNotifyRemote()
-	return ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Notify")
+	local character = player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		return
+	end
+	if state.SpeedLevel > 0 then
+		humanoid.WalkSpeed = Config.Upgrades.speed.Speeds[state.SpeedLevel]
+	else
+		humanoid.WalkSpeed = Config.DefaultWalkSpeed
+	end
 end
 
 function RebirthService.tryRebirth(player)
-	local data = MoneyService.getData(player)
-	if not data then
+	local state = MoneyService.get(player)
+	if not state then
 		return false, "Data pemain belum siap."
 	end
-	local nextRebirth = RebirthService.getNextRebirth(player)
-	if not nextRebirth then
+	local nextLevel = state.Rebirths + 1
+	local tier = Config.Rebirths[nextLevel]
+	if not tier then
 		return false, "Kamu sudah mencapai rebirth maksimal!"
 	end
-	if data.totalEarned < nextRebirth.totalEarned then
-		return false, "Butuh total pendapatan $" .. nextRebirth.totalEarned .. " (kamu: $" .. data.totalEarned .. ")."
+	if state.TotalEarned < tier.Need then
+		return false, "Butuh total penghasilan $" .. tier.Need .. " untuk rebirth."
 	end
-	data.rebirths += 1
-	data.cash = Config.BASE_CASH_AFTER_REBIRTH
-	MoneyService.syncValues(player)
-	player:SetAttribute("RebirthTitle", nextRebirth.title)
-	getNotifyRemote():FireClient(player, "REBIRTH! Gelar baru: " .. nextRebirth.title .. " (+25% pendapatan selamanya)", "rebirth")
-	return true, nextRebirth.title
+	state.Rebirths = nextLevel
+	state.Title = tier.Title
+	MoneyService.setCash(player, Config.RebirthCash)
+	MoneyService.sync(player)
+	Notify:FireClient(player, "REBIRTH! Kamu sekarang " .. tier.Title .. " (x" .. string.format("%.2f", MoneyService.multiplier(player)) .. " penghasilan)!", "rebirth")
+	return true, tier.Title
 end
 
-local function getUpgradeLevel(data, upgradeId)
-	if upgradeId == "speed" then
-		return data.speedLevel
-	elseif upgradeId == "carry" then
-		return data.carryCapacity - 1
-	elseif upgradeId == "income" then
-		return data.incomeLevel
-	end
-	return 0
-end
-
-function RebirthService.tryBuyUpgrade(player, upgradeId)
-	local def = Config.UPGRADES[upgradeId]
+function RebirthService.buyUpgrade(player, id)
+	local def = Config.Upgrades[id]
 	if not def then
 		return false, "Upgrade tidak dikenal."
 	end
-	local data = MoneyService.getData(player)
-	if not data then
+	local state = MoneyService.get(player)
+	if not state then
 		return false, "Data pemain belum siap."
 	end
-	local level = getUpgradeLevel(data, upgradeId)
-	if level >= #def.costs then
-		return false, def.name .. " sudah maksimal!"
+
+	-- The level already owned: speed and income count levels, carry is a
+	-- single level (capacity 1 -> 2).
+	local current = 0
+	if id == "speed" then
+		current = state.SpeedLevel
+	elseif id == "income" then
+		current = state.IncomeLevel
+	elseif id == "carry" then
+		current = state.CarryCapacity - 1
 	end
-	local cost = def.costs[level + 1]
-	if not MoneyService.spendCash(player, cost) then
-		return false, "Uang tidak cukup! Butuh $" .. cost .. "."
+
+	local cost = def.Costs[current + 1]
+	if not cost then
+		return false, def.Name .. " sudah MAX!"
 	end
-	if upgradeId == "speed" then
-		data.speedLevel += 1
-		player:SetAttribute("SpeedLevel", data.speedLevel)
-		local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
-		if humanoid then
-			humanoid.WalkSpeed = def.speeds[data.speedLevel]
-		end
-	elseif upgradeId == "carry" then
-		data.carryCapacity = 2
-		player:SetAttribute("CarryCapacity", 2)
-	elseif upgradeId == "income" then
-		data.incomeLevel += 1
-		player:SetAttribute("IncomeLevel", data.incomeLevel)
+	if not MoneyService.spend(player, cost) then
+		return false, "Uangmu tidak cukup! Butuh $" .. cost .. "."
 	end
-	MoneyService.syncValues(player)
-	getNotifyRemote():FireClient(player, def.name .. " dibeli! (" .. (level + 1) .. "/" .. #def.costs .. ")", "good")
-	return true, def.name
+
+	if id == "speed" then
+		state.SpeedLevel = current + 1
+		RebirthService.applyWalkSpeed(player)
+	elseif id == "income" then
+		state.IncomeLevel = current + 1
+	elseif id == "carry" then
+		state.CarryCapacity = 2
+	end
+	MoneyService.sync(player)
+	Notify:FireClient(player, def.Name .. " dibeli! (" .. def.Desc .. ")", "good")
+	return true, def.Name
 end
 
 return RebirthService

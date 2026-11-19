@@ -1,474 +1,474 @@
--- Pasar Brainrot: the cast and the conveyor.
--- Builds each of the nine original characters from plain Parts (no uploaded
--- assets, so the game looks the same in every Studio), walks them along the
--- conveyor belt, and sells them to players who press E. A bought brainrot is
--- handed to BaseService to carry home; a dropped one comes back here.
-
-local BrainrotSpawner = {}
+-- BrainrotSpawner.luau
+-- Builds the nine snack characters from plain parts, walks them down the
+-- conveyor belt, and sells them. Each character is a Model built around the
+-- origin facing +Z, then scaled up 1.4x so the shapes read clearly from
+-- across the market.
+--
+-- Placement and carrying never trust the nominal body height: after scaling,
+-- the model's real bounding box is measured and the distances from the pivot
+-- (the Body part) down to the bottom and up to the top are stored as
+-- attributes. Legs, wheels and plates stick out below the body, so only the
+-- measured offsets put a model flush on a surface.
+--
+-- One proximity prompt lives on each brainrot for its whole life: on the
+-- belt it buys, on a lapak it takes (steal from others, pick up your own).
+-- The lapak service is injected through init() so this module never requires
+-- it back (that would be a require cycle).
 
 local Config = require(script.Parent.Config)
 local MoneyService = require(script.Parent.MoneyService)
-local BaseService = require(script.Parent.BaseService)
 
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace = game:GetService("Workspace")
 
-local conveyorFolder = nil
-local active = {}
+local Notify = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Notify")
 
--- Part helpers. Models are built around the origin (0,0,0) and moved with
--- PivotTo, so every offset below is relative to the model's centre.
-local function addPart(model, name, size, offset, color, material, shape)
+local Spawner = {}
+
+local SCALE = 1.4
+local handlers = {} -- canCarry, carry, take: set by init()
+local active = {} -- belt entries: { Model, X, Phase, BaseY }
+local activeByModel = {} -- [model] = belt entry
+
+-- A part of a character, placed relative to the model origin. Characters are
+-- decorative, so their parts never collide.
+local function addPart(model, name, size, offset, color, material, shape, rotation)
 	local part = Instance.new("Part")
 	part.Name = name
 	part.Size = size
-	part.Position = offset
+	if rotation then
+		part.CFrame = CFrame.new(offset) * rotation
+	else
+		part.CFrame = CFrame.new(offset)
+	end
 	part.Color = color
 	part.Material = material or Enum.Material.SmoothPlastic
-	part.Anchored = true
-	part.CanCollide = false
-	part.TopSurface = Enum.SurfaceType.Smooth
-	part.BottomSurface = Enum.SurfaceType.Smooth
 	if shape then
 		part.Shape = shape
 	end
-	part.Parent = model
-	return part
-end
-
-local function addCylinder(model, name, radius, height, offset, color, axis, material, transparency)
-	local part = Instance.new("Part")
-	part.Name = name
-	part.Shape = Enum.PartType.Cylinder
-	part.Size = Vector3.new(height, radius * 2, radius * 2)
-	part.Color = color
-	part.Material = material or Enum.Material.SmoothPlastic
-	part.Transparency = transparency or 0
 	part.Anchored = true
 	part.CanCollide = false
-	part.TopSurface = Enum.SurfaceType.Smooth
-	part.BottomSurface = Enum.SurfaceType.Smooth
-	local cf = CFrame.new(offset)
-	if axis == "Y" then
-		cf *= CFrame.Angles(0, 0, math.rad(90))
-	elseif axis == "Z" then
-		cf *= CFrame.Angles(0, math.rad(90), 0)
-	end
-	part.CFrame = cf
 	part.Parent = model
 	return part
 end
 
-local function addEyes(model, y, z, spacing, size)
-	size = size or 0.5
-	addPart(model, "EyeL", Vector3.new(size, size, size), Vector3.new(-spacing, y, z), Color3.fromRGB(20, 20, 20), Enum.Material.SmoothPlastic, Enum.PartType.Ball)
-	addPart(model, "EyeR", Vector3.new(size, size, size), Vector3.new(spacing, y, z), Color3.fromRGB(20, 20, 20), Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+-- A vertical cylinder. A cylinder part's axis runs along X, so standing one
+-- up means turning it 90 degrees around Z.
+local function addCylinderUp(model, name, radius, height, offset, color, material, transparency)
+	local part = addPart(model, name, Vector3.new(height, radius * 2, radius * 2), offset, color, material, Enum.PartType.Cylinder, CFrame.Angles(0, 0, math.rad(90)))
+	if transparency then
+		part.Transparency = transparency
+	end
+	return part
 end
 
-local function addWings(model, y, color, span)
-	span = span or 1.5
-	local left = addPart(model, "WingL", Vector3.new(1.4, 0.15, 0.9), Vector3.new(-span, y, 0), color)
-	left.CFrame = CFrame.new(-span, y, 0) * CFrame.Angles(0, 0, math.rad(20))
-	local right = addPart(model, "WingR", Vector3.new(1.4, 0.15, 0.9), Vector3.new(span, y, 0), color)
-	right.CFrame = CFrame.new(span, y, 0) * CFrame.Angles(0, 0, math.rad(-20))
+-- Two black ball eyes, level with each other on the face.
+local function addEyes(model, y, z, halfGap, size)
+	addPart(model, "EyeLeft", Vector3.new(size, size, size), Vector3.new(-halfGap, y, z), Color3.new(0, 0, 0), Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+	addPart(model, "EyeRight", Vector3.new(size, size, size), Vector3.new(halfGap, y, z), Color3.new(0, 0, 0), Enum.Material.SmoothPlastic, Enum.PartType.Ball)
 end
 
--- One builder per character. Each names its main body part "Body", which
--- becomes the model's PrimaryPart. Front is +Z in model space.
-local BUILDERS = {}
-
-BUILDERS.bakso = function(model, def)
-	addPart(model, "Body", Vector3.new(2.2, 2.2, 2.2), Vector3.new(0, 0, 0), def.color, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
-	addPart(model, "LegL", Vector3.new(0.4, 0.8, 0.4), Vector3.new(-0.5, -1.3, 0.2), Color3.fromRGB(90, 60, 35))
-	addPart(model, "LegR", Vector3.new(0.4, 0.8, 0.4), Vector3.new(0.5, -1.3, 0.2), Color3.fromRGB(90, 60, 35))
-	addCylinder(model, "Headband", 1.15, 0.28, Vector3.new(0, 0.7, 0), Color3.fromRGB(220, 50, 50), "Y")
-	addEyes(model, 0.3, 0.95, 0.45)
+-- A pair of flat white wings, angled slightly upward, one on each side.
+local function addWings(model, xOut, y, sizeX, sizeZ, tilt)
+	addPart(model, "WingLeft", Vector3.new(sizeX, 0.12, sizeZ), Vector3.new(-xOut, y, 0), Color3.fromRGB(245, 245, 245), Enum.Material.SmoothPlastic, nil, CFrame.Angles(0, 0, math.rad(tilt)))
+	addPart(model, "WingRight", Vector3.new(sizeX, 0.12, sizeZ), Vector3.new(xOut, y, 0), Color3.fromRGB(245, 245, 245), Enum.Material.SmoothPlastic, nil, CFrame.Angles(0, 0, math.rad(-tilt)))
 end
 
-BUILDERS.teh = function(model, def)
-	addCylinder(model, "Body", 0.95, 2.4, Vector3.new(0, 0, 0), Color3.fromRGB(255, 210, 120), "Y", Enum.Material.Glass, 0.25)
-	addCylinder(model, "Tea", 0.78, 1.8, Vector3.new(0, -0.2, 0), Color3.fromRGB(235, 150, 40), "Y")
-	addPart(model, "Ice1", Vector3.new(0.5, 0.5, 0.5), Vector3.new(-0.3, 0.8, 0.2), Color3.fromRGB(220, 240, 255), Enum.Material.Glass)
-	addPart(model, "Ice2", Vector3.new(0.5, 0.5, 0.5), Vector3.new(0.35, 0.7, -0.2), Color3.fromRGB(220, 240, 255), Enum.Material.Glass)
-	local straw = addCylinder(model, "Straw", 0.12, 2.4, Vector3.new(0.4, 1.2, 0), Color3.fromRGB(230, 60, 60), "Y")
-	straw.CFrame = CFrame.new(0.4, 1.2, 0) * CFrame.Angles(0, 0, math.rad(-18))
-	addWings(model, 0.2, Color3.fromRGB(255, 255, 255))
-	addEyes(model, 0.3, 0.85, 0.4)
+-- The nine builders. Each one's first part is the "Body", which becomes the
+-- model's PrimaryPart. All offsets are pre-scale, relative to the origin.
+local builders = {}
+
+builders.bakso = function(model, def)
+	addPart(model, "Body", Vector3.new(2.2, 2.2, 2.2), Vector3.new(0, 0, 0), def.Color, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+	addPart(model, "LegLeft", Vector3.new(0.4, 0.8, 0.4), Vector3.new(-0.5, -1.3, 0), Color3.fromRGB(60, 45, 35))
+	addPart(model, "LegRight", Vector3.new(0.4, 0.8, 0.4), Vector3.new(0.5, -1.3, 0), Color3.fromRGB(60, 45, 35))
+	addCylinderUp(model, "Headband", 1.15, 0.28, Vector3.new(0, 0.7, 0), Color3.fromRGB(220, 40, 40))
+	addEyes(model, 0.3, 0.95, 0.45, 0.5)
 end
 
-BUILDERS.gorengan = function(model, def)
-	addPart(model, "Body", Vector3.new(2.4, 1.7, 1.7), Vector3.new(0, -0.2, 0), def.color)
-	addPart(model, "TopBlob", Vector3.new(1.8, 1.4, 1.5), Vector3.new(0, 0.8, 0), Color3.fromRGB(250, 205, 80), Enum.Material.SmoothPlastic, Enum.PartType.Ball)
-	local browL = addPart(model, "BrowL", Vector3.new(0.7, 0.16, 0.16), Vector3.new(-0.5, 0.65, 0.9), Color3.fromRGB(30, 20, 10))
-	browL.CFrame = CFrame.new(-0.5, 0.65, 0.9) * CFrame.Angles(0, 0, math.rad(25))
-	local browR = addPart(model, "BrowR", Vector3.new(0.7, 0.16, 0.16), Vector3.new(0.5, 0.65, 0.9), Color3.fromRGB(30, 20, 10))
-	browR.CFrame = CFrame.new(0.5, 0.65, 0.9) * CFrame.Angles(0, 0, math.rad(-25))
-	addEyes(model, 0.25, 0.9, 0.5)
-	addPart(model, "ArmL", Vector3.new(0.35, 1.1, 0.35), Vector3.new(-1.4, -0.3, 0), Color3.fromRGB(230, 175, 55))
-	addPart(model, "ArmR", Vector3.new(0.35, 1.1, 0.35), Vector3.new(1.4, -0.3, 0), Color3.fromRGB(230, 175, 55))
+builders.teh = function(model, def)
+	addCylinderUp(model, "Body", 0.95, 2.4, Vector3.new(0, 0, 0), Color3.fromRGB(240, 220, 130), Enum.Material.Glass, 0.25)
+	addCylinderUp(model, "Tea", 0.78, 1.8, Vector3.new(0, -0.2, 0), Color3.fromRGB(230, 140, 40))
+	addPart(model, "IceLeft", Vector3.new(0.6, 0.6, 0.6), Vector3.new(-0.35, 0.85, 0), Color3.fromRGB(230, 245, 255), Enum.Material.Glass, nil, CFrame.Angles(0, math.rad(20), 0))
+	addPart(model, "IceRight", Vector3.new(0.6, 0.6, 0.6), Vector3.new(0.35, 0.85, 0), Color3.fromRGB(230, 245, 255), Enum.Material.Glass, nil, CFrame.Angles(0, math.rad(-15), 0))
+	local straw = addPart(model, "Straw", Vector3.new(2, 0.24, 0.24), Vector3.new(0.55, 1.1, 0), Color3.fromRGB(220, 40, 40), Enum.Material.SmoothPlastic, Enum.PartType.Cylinder, CFrame.Angles(0, 0, math.rad(108)))
+	straw.TopSurface = Enum.SurfaceType.Smooth
+	addWings(model, 1.15, 0.2, 1, 0.8, 20)
+	addEyes(model, 0.3, 0.85, 0.4, 0.45)
 end
 
-BUILDERS.kucing = function(model, def)
-	addPart(model, "Body", Vector3.new(2.4, 2.4, 2.4), Vector3.new(0, 0, 0), def.color, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
-	local earL = Instance.new("WedgePart")
-	earL.Name = "EarL"
-	earL.Size = Vector3.new(0.8, 0.9, 0.7)
-	earL.Position = Vector3.new(-0.7, 1.4, 0)
-	earL.Color = def.color
-	earL.Anchored = true
-	earL.CanCollide = false
-	earL.Parent = model
-	local earR = Instance.new("WedgePart")
-	earR.Name = "EarR"
-	earR.Size = Vector3.new(0.8, 0.9, 0.7)
-	earR.Position = Vector3.new(0.7, 1.4, 0)
-	earR.Color = def.color
-	earR.Anchored = true
-	earR.CanCollide = false
-	earR.Parent = model
-	addPart(model, "Tail1", Vector3.new(0.35, 1.2, 0.35), Vector3.new(0, 0.6, -1.3), def.color)
-	local tail2 = addPart(model, "Tail2", Vector3.new(0.35, 1.0, 0.35), Vector3.new(0, 1.5, -1.5), def.color)
-	tail2.CFrame = CFrame.new(0, 1.5, -1.5) * CFrame.Angles(math.rad(35), 0, 0)
-	addPart(model, "Nose", Vector3.new(0.3, 0.25, 0.2), Vector3.new(0, -0.05, 1.2), Color3.fromRGB(255, 150, 180))
+builders.gorengan = function(model, def)
+	addPart(model, "Body", Vector3.new(2.4, 1.7, 1.7), Vector3.new(0, -0.2, 0), def.Color)
+	addPart(model, "TopBlob", Vector3.new(1.6, 1.6, 1.6), Vector3.new(0, 0.9, 0), Color3.fromRGB(250, 215, 120), Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+	addPart(model, "BrowLeft", Vector3.new(0.7, 0.18, 0.2), Vector3.new(-0.5, 0.75, 0.85), Color3.fromRGB(60, 40, 20), Enum.Material.SmoothPlastic, nil, CFrame.Angles(0, 0, math.rad(25)))
+	addPart(model, "BrowRight", Vector3.new(0.7, 0.18, 0.2), Vector3.new(0.5, 0.75, 0.85), Color3.fromRGB(60, 40, 20), Enum.Material.SmoothPlastic, nil, CFrame.Angles(0, 0, math.rad(-25)))
+	addEyes(model, 0.35, 0.9, 0.5, 0.5)
+	addPart(model, "ArmLeft", Vector3.new(0.9, 0.35, 0.35), Vector3.new(-1.5, -0.3, 0), def.Color, Enum.Material.SmoothPlastic, nil, CFrame.Angles(0, 0, math.rad(30)))
+	addPart(model, "ArmRight", Vector3.new(0.9, 0.35, 0.35), Vector3.new(1.5, -0.3, 0), def.Color, Enum.Material.SmoothPlastic, nil, CFrame.Angles(0, 0, math.rad(-30)))
+end
+
+builders.kucing = function(model, def)
+	addPart(model, "Body", Vector3.new(2.4, 2.4, 2.4), Vector3.new(0, 0, 0), def.Color, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+	addPart(model, "EarLeft", Vector3.new(0.7, 0.8, 0.5), Vector3.new(-0.7, 1.4, 0), def.Color, Enum.Material.SmoothPlastic, Enum.PartType.Wedge)
+	addPart(model, "EarRight", Vector3.new(0.7, 0.8, 0.5), Vector3.new(0.7, 1.4, 0), def.Color, Enum.Material.SmoothPlastic, Enum.PartType.Wedge)
+	addPart(model, "TailLow", Vector3.new(0.35, 1, 0.35), Vector3.new(0, 0.6, -1.3), def.Color, Enum.Material.SmoothPlastic, nil, CFrame.Angles(math.rad(-30), 0, 0))
+	addPart(model, "TailHigh", Vector3.new(0.35, 0.9, 0.35), Vector3.new(0, 1.4, -1.6), def.Color, Enum.Material.SmoothPlastic, nil, CFrame.Angles(math.rad(20), 0, 0))
+	addPart(model, "Nose", Vector3.new(0.3, 0.3, 0.3), Vector3.new(0, 0.05, 1.2), Color3.fromRGB(255, 150, 180), Enum.Material.SmoothPlastic, Enum.PartType.Ball)
 	addEyes(model, 0.35, 1.05, 0.5, 0.54)
 end
 
-BUILDERS.geprek = function(model, def)
-	addPart(model, "Body", Vector3.new(2.6, 2.6, 2.6), Vector3.new(0, 0, 0), def.color, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
-	addWings(model, 0.1, Color3.fromRGB(200, 150, 90), 1.8)
-	local beak = Instance.new("WedgePart")
-	beak.Name = "Beak"
-	beak.Size = Vector3.new(0.6, 0.5, 0.9)
-	beak.Position = Vector3.new(0, -0.15, 1.4)
-	beak.Color = Color3.fromRGB(255, 160, 30)
-	beak.Anchored = true
-	beak.CanCollide = false
-	beak.CFrame = CFrame.new(0, -0.15, 1.4) * CFrame.Angles(math.rad(90), 0, 0)
-	beak.Parent = model
-	addPart(model, "Comb", Vector3.new(0.4, 0.7, 1.0), Vector3.new(0, 1.5, 0.1), Color3.fromRGB(220, 40, 40))
-	addPart(model, "FootL", Vector3.new(0.4, 0.4, 0.7), Vector3.new(-0.5, -1.4, 0.3), Color3.fromRGB(255, 160, 30))
-	addPart(model, "FootR", Vector3.new(0.4, 0.4, 0.7), Vector3.new(0.5, -1.4, 0.3), Color3.fromRGB(255, 160, 30))
-	addEyes(model, 0.5, 1.1, 0.55)
-end
-
-BUILDERS.durian = function(model, def)
-	addPart(model, "Body", Vector3.new(3.0, 3.0, 3.0), Vector3.new(0, 0, 0), def.color, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
-	-- Bumpy shell: eight knobs around the body read as durian spikes.
-	local knobs = {
-		Vector3.new(0, 1.5, 0), Vector3.new(1.4, 0.5, 0), Vector3.new(-1.4, 0.5, 0),
-		Vector3.new(0, 0.5, 1.4), Vector3.new(0, 0.5, -1.4), Vector3.new(1.0, -0.9, 1.0),
-		Vector3.new(-1.0, -0.9, -1.0), Vector3.new(0, -1.5, 0),
-	}
-	for i, pos in ipairs(knobs) do
-		addPart(model, "Knob" .. i, Vector3.new(0.55, 0.55, 0.55), pos, Color3.fromRGB(70, 130, 45), Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+builders.geprek = function(model, def)
+	addPart(model, "Body", Vector3.new(2.6, 2.6, 2.6), Vector3.new(0, 0, 0), def.Color, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+	addPart(model, "WingLeft", Vector3.new(1.6, 0.15, 1), Vector3.new(-1.7, 0, 0), Color3.fromRGB(220, 170, 100), Enum.Material.SmoothPlastic, nil, CFrame.Angles(0, 0, math.rad(25)))
+	addPart(model, "WingRight", Vector3.new(1.6, 0.15, 1), Vector3.new(1.7, 0, 0), Color3.fromRGB(220, 170, 100), Enum.Material.SmoothPlastic, nil, CFrame.Angles(0, 0, math.rad(-25)))
+	addPart(model, "Beak", Vector3.new(0.7, 0.6, 0.9), Vector3.new(0, 0.1, 1.4), Color3.fromRGB(255, 140, 40), Enum.Material.SmoothPlastic, Enum.PartType.Wedge, CFrame.Angles(math.rad(90), 0, 0))
+	for i, z in ipairs({ -0.3, 0, 0.3 }) do
+		addPart(model, "Comb" .. i, Vector3.new(0.35, 0.35, 0.35), Vector3.new(0, 1.45, z), Color3.fromRGB(220, 40, 40), Enum.Material.SmoothPlastic, Enum.PartType.Ball)
 	end
-	addCylinder(model, "Fuse", 0.1, 0.9, Vector3.new(0, 1.9, 0), Color3.fromRGB(120, 85, 50), "Y")
-	addPart(model, "Spark", Vector3.new(0.4, 0.4, 0.4), Vector3.new(0, 2.4, 0), Color3.fromRGB(255, 220, 60), Enum.Material.Neon, Enum.PartType.Ball)
-	addEyes(model, 0.3, 1.4, 0.6, 0.57)
+	addPart(model, "FootLeft", Vector3.new(0.5, 0.5, 0.9), Vector3.new(-0.5, -1.5, 0.2), Color3.fromRGB(255, 140, 40))
+	addPart(model, "FootRight", Vector3.new(0.5, 0.5, 0.9), Vector3.new(0.5, -1.5, 0.2), Color3.fromRGB(255, 140, 40))
+	addEyes(model, 0.5, 1.1, 0.55, 0.5)
 end
 
-BUILDERS.kopi = function(model, def)
-	addCylinder(model, "Body", 1.5, 3.2, Vector3.new(0, 0, 0), def.color, "Y")
-	addCylinder(model, "CoffeeTop", 1.35, 0.25, Vector3.new(0, 1.5, 0), Color3.fromRGB(140, 90, 45), "Y")
-	addCylinder(model, "Saucer", 2.0, 0.25, Vector3.new(0, -1.7, 0), Color3.fromRGB(240, 230, 210), "Y")
-	addCylinder(model, "Handle", 0.16, 1.6, Vector3.new(1.65, 0.2, 0), def.color, "Y")
-	addPart(model, "HandleTop", Vector3.new(0.5, 0.3, 0.3), Vector3.new(1.5, 0.95, 0), def.color)
-	addPart(model, "HandleBottom", Vector3.new(0.5, 0.3, 0.3), Vector3.new(1.5, -0.55, 0), def.color)
-	local steam1 = addPart(model, "Steam1", Vector3.new(0.7, 0.7, 0.7), Vector3.new(-0.4, 2.3, 0), Color3.fromRGB(255, 255, 255), Enum.Material.SmoothPlastic, Enum.PartType.Ball)
-	steam1.Transparency = 0.5
-	local steam2 = addPart(model, "Steam2", Vector3.new(0.5, 0.5, 0.5), Vector3.new(0.4, 2.8, 0), Color3.fromRGB(255, 255, 255), Enum.Material.SmoothPlastic, Enum.PartType.Ball)
-	steam2.Transparency = 0.6
-	addEyes(model, 0.3, 1.4, 0.6, 0.6)
+builders.durian = function(model, def)
+	addPart(model, "Body", Vector3.new(3, 3, 3), Vector3.new(0, 0, 0), def.Color, Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+	local spikeSpots = {
+		Vector3.new(0, 1.6, 0),
+		Vector3.new(0, -1.6, 0),
+		Vector3.new(-1.6, 0, 0),
+		Vector3.new(1.6, 0, 0),
+		Vector3.new(0, 0, 1.6),
+		Vector3.new(0, 0, -1.6),
+		Vector3.new(-1.1, 1.1, 0),
+		Vector3.new(1.1, 1.1, 0),
+	}
+	for i, spot in ipairs(spikeSpots) do
+		addPart(model, "Spike" .. i, Vector3.new(0.5, 0.5, 0.5), spot, Color3.fromRGB(60, 140, 50), Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+	end
+	addCylinderUp(model, "Fuse", 0.12, 0.8, Vector3.new(0, 1.9, 0), Color3.fromRGB(120, 80, 40))
+	addPart(model, "Spark", Vector3.new(0.45, 0.45, 0.45), Vector3.new(0, 2.5, 0), Color3.fromRGB(255, 230, 80), Enum.Material.Neon, Enum.PartType.Ball)
+	addEyes(model, 0.3, 1.4, 0.6, 0.55)
 end
 
-BUILDERS.gerobak = function(model, def)
-	addPart(model, "Body", Vector3.new(3.6, 1.5, 2.2), Vector3.new(0, 0, 0), def.color, Enum.Material.WoodPlanks)
-	addCylinder(model, "WheelL", 0.7, 0.4, Vector3.new(-1.2, -1.0, 1.25), Color3.fromRGB(40, 35, 45), "Z")
-	addCylinder(model, "WheelR", 0.7, 0.4, Vector3.new(-1.2, -1.0, -1.25), Color3.fromRGB(40, 35, 45), "Z")
-	addCylinder(model, "WheelL2", 0.7, 0.4, Vector3.new(1.2, -1.0, 1.25), Color3.fromRGB(40, 35, 45), "Z")
-	addCylinder(model, "WheelR2", 0.7, 0.4, Vector3.new(1.2, -1.0, -1.25), Color3.fromRGB(40, 35, 45), "Z")
-	addCylinder(model, "UmbrellaPole", 0.12, 2.4, Vector3.new(0, 1.9, 0), Color3.fromRGB(120, 90, 60), "Y")
-	addCylinder(model, "Umbrella", 2.2, 0.2, Vector3.new(0, 3.1, 0), Color3.fromRGB(230, 60, 60), "Y")
-	addPart(model, "BaksoBall", Vector3.new(1.2, 1.2, 1.2), Vector3.new(0.8, 1.3, 0), Color3.fromRGB(150, 100, 60), Enum.Material.SmoothPlastic, Enum.PartType.Ball)
-	addWings(model, 0.4, Color3.fromRGB(255, 255, 255), 2.3)
-	addEyes(model, 0.2, 1.15, 0.7, 0.54)
+builders.kopi = function(model, def)
+	addCylinderUp(model, "Body", 1.5, 3.2, Vector3.new(0, 0, 0), def.Color)
+	addCylinderUp(model, "CoffeeTop", 1.35, 0.15, Vector3.new(0, 1.6, 0), Color3.fromRGB(90, 55, 30))
+	addCylinderUp(model, "Saucer", 1.9, 0.25, Vector3.new(0, -1.75, 0), Color3.fromRGB(245, 245, 240))
+	addCylinderUp(model, "HandleBar", 0.18, 1.6, Vector3.new(1.65, 0, 0), def.Color)
+	addPart(model, "HandleTop", Vector3.new(0.5, 0.3, 0.3), Vector3.new(1.55, 0.7, 0), def.Color)
+	addPart(model, "HandleBottom", Vector3.new(0.5, 0.3, 0.3), Vector3.new(1.55, -0.7, 0), def.Color)
+	addPart(model, "SteamLow", Vector3.new(0.7, 0.7, 0.7), Vector3.new(-0.4, 2.2, 0), Color3.fromRGB(255, 255, 255), Enum.Material.SmoothPlastic, Enum.PartType.Ball).Transparency = 0.5
+	addPart(model, "SteamHigh", Vector3.new(0.55, 0.55, 0.55), Vector3.new(0.4, 2.7, 0), Color3.fromRGB(255, 255, 255), Enum.Material.SmoothPlastic, Enum.PartType.Ball).Transparency = 0.5
+	addEyes(model, 0.3, 1.4, 0.55, 0.55)
 end
 
-BUILDERS.padang = function(model, def)
-	addCylinder(model, "Plate", 2.1, 0.3, Vector3.new(0, -1.2, 0), Color3.fromRGB(245, 245, 245), "Y")
-	addCylinder(model, "GoldRing", 2.3, 0.15, Vector3.new(0, -1.45, 0), Color3.fromRGB(255, 183, 3), "Y", Enum.Material.Neon)
-	addPart(model, "Body", Vector3.new(2.6, 1.7, 2.6), Vector3.new(0, -0.3, 0), Color3.fromRGB(255, 250, 235), Enum.Material.SmoothPlastic, Enum.PartType.Ball)
-	addPart(model, "Rendang1", Vector3.new(0.7, 0.6, 0.7), Vector3.new(-0.6, 0.6, 0.3), Color3.fromRGB(110, 60, 30))
-	addPart(model, "Rendang2", Vector3.new(0.7, 0.6, 0.7), Vector3.new(0.5, 0.65, -0.3), Color3.fromRGB(110, 60, 30))
-	addPart(model, "Rendang3", Vector3.new(0.6, 0.5, 0.6), Vector3.new(0.1, 0.7, 0.5), Color3.fromRGB(130, 70, 35))
-	addCylinder(model, "Chili", 0.14, 1.0, Vector3.new(0.9, 0.7, 0.4), Color3.fromRGB(220, 30, 30), "Y")
+builders.gerobak = function(model, def)
+	addPart(model, "Body", Vector3.new(3.6, 1.5, 2.2), Vector3.new(0, 0.3, 0), def.Color)
+	for _, wx in ipairs({ -1.4, 1.4 }) do
+		for _, wz in ipairs({ -0.9, 0.9 }) do
+			addPart(model, "Wheel", Vector3.new(0.4, 1.4, 1.4), Vector3.new(wx, -0.7, wz), Color3.fromRGB(50, 45, 45), Enum.Material.SmoothPlastic, Enum.PartType.Cylinder)
+		end
+	end
+	addCylinderUp(model, "UmbrellaPole", 0.12, 2.5, Vector3.new(0, 2.2, 0), Color3.fromRGB(80, 75, 85))
+	addCylinderUp(model, "Umbrella", 2.2, 0.2, Vector3.new(0, 3.5, 0), Color3.fromRGB(220, 60, 60))
+	addPart(model, "Meatball", Vector3.new(0.8, 0.8, 0.8), Vector3.new(0.8, 1.3, 0.3), Color3.fromRGB(225, 170, 110), Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+	addWings(model, 2.1, 0.5, 1.2, 0.9, 20)
+	addEyes(model, 0.5, 1.15, 0.7, 0.5)
+end
+
+builders.padang = function(model, def)
+	addCylinderUp(model, "Body", 2.1, 0.25, Vector3.new(0, -0.5, 0), Color3.fromRGB(255, 250, 240))
+	addCylinderUp(model, "GoldRing", 2.3, 0.15, Vector3.new(0, -0.75, 0), Color3.fromRGB(255, 183, 3), Enum.Material.Neon)
+	addPart(model, "Rice", Vector3.new(2.2, 2.2, 2.2), Vector3.new(0, 0.6, 0), Color3.fromRGB(255, 250, 240), Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+	addPart(model, "Rendang1", Vector3.new(0.7, 0.7, 0.7), Vector3.new(-0.7, 1.5, 0.4), Color3.fromRGB(110, 70, 35), Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+	addPart(model, "Rendang2", Vector3.new(0.7, 0.7, 0.7), Vector3.new(0.6, 1.6, -0.3), Color3.fromRGB(110, 70, 35), Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+	addPart(model, "Rendang3", Vector3.new(0.7, 0.7, 0.7), Vector3.new(0.1, 1.8, 0.6), Color3.fromRGB(110, 70, 35), Enum.Material.SmoothPlastic, Enum.PartType.Ball)
+	addPart(model, "Chilli", Vector3.new(0.9, 0.3, 0.3), Vector3.new(0.9, 1.4, 0.5), Color3.fromRGB(220, 40, 40), Enum.Material.SmoothPlastic, Enum.PartType.Cylinder, CFrame.Angles(0, 0, math.rad(40)))
 	for i = 1, 3 do
-		local angle = (i - 1) * math.rad(120)
-		addPart(model, "Sparkle" .. i, Vector3.new(0.35, 0.35, 0.35), Vector3.new(math.cos(angle) * 2.5, 0.6, math.sin(angle) * 2.5), Color3.fromRGB(255, 220, 80), Enum.Material.Neon, Enum.PartType.Ball)
+		local angle = math.rad((i - 1) * 120)
+		addPart(model, "Sparkle" .. i, Vector3.new(0.3, 0.3, 0.3), Vector3.new(math.cos(angle) * 2.5, 0.5, math.sin(angle) * 2.5), Color3.fromRGB(255, 183, 3), Enum.Material.Neon, Enum.PartType.Ball)
 	end
 	local glow = Instance.new("PointLight")
-	glow.Color = Color3.fromRGB(255, 200, 80)
+	glow.Color = Color3.fromRGB(255, 210, 120)
 	glow.Range = 12
 	glow.Brightness = 2
-	glow.Parent = model
-	addEyes(model, 0.1, 1.25, 0.55, 0.54)
+	glow.Parent = model.Body
+	addEyes(model, 0.9, 1, 0.5, 0.5)
 end
 
--- Name + rarity + $/second label floating above the character.
-local function attachNameLabel(model, def)
-	local primary = model.PrimaryPart
-	local gui = Instance.new("BillboardGui")
-	gui.Name = "NameLabel"
-	gui.Adornee = primary
-	gui.Size = UDim2.fromOffset(170, 66)
-	gui.StudsOffset = Vector3.new(0, def.size / 2 + 1.2, 0)
-	gui.AlwaysOnTop = true
-	gui.Parent = model
-	local rarity = Config.RARITIES[def.rarity]
-	local nameLabel = Instance.new("TextLabel")
-	nameLabel.Name = "NameLine"
-	nameLabel.Size = UDim2.new(1, 0, 0.4, 0)
-	nameLabel.BackgroundTransparency = 1
-	nameLabel.Text = def.name
-	nameLabel.TextColor3 = rarity.color
-	nameLabel.TextSize = 18
-	nameLabel.Font = Enum.Font.LuckiestGuy
-	nameLabel.TextStrokeTransparency = 0.1
-	nameLabel.Parent = gui
-	local rateLabel = Instance.new("TextLabel")
-	rateLabel.Name = "RateLine"
-	rateLabel.Position = UDim2.new(0, 0, 0.4, 0)
-	rateLabel.Size = UDim2.new(1, 0, 0.3, 0)
-	rateLabel.BackgroundTransparency = 1
-	rateLabel.Text = def.rarity:upper() .. "  •  $" .. def.rate .. "/detik"
-	rateLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-	rateLabel.TextSize = 15
-	rateLabel.Font = Enum.Font.GothamBold
-	rateLabel.TextStrokeTransparency = 0.1
-	rateLabel.Parent = gui
-	local priceLabel = Instance.new("TextLabel")
-	priceLabel.Name = "PriceLine"
-	priceLabel.Position = UDim2.new(0, 0, 0.7, 0)
-	priceLabel.Size = UDim2.new(1, 0, 0.3, 0)
-	priceLabel.BackgroundTransparency = 1
-	priceLabel.Text = "BELI $" .. def.price
-	priceLabel.TextColor3 = Color3.fromRGB(120, 255, 140)
-	priceLabel.TextSize = 16
-	priceLabel.Font = Enum.Font.GothamBlack
-	priceLabel.TextStrokeTransparency = 0.1
-	priceLabel.Parent = gui
-	return gui
+-- The floating name label: name in the rarity colour, rarity and income
+-- beneath it, and a green price line that hides once the brainrot is placed.
+local function attachLabel(model, def)
+	local tag = Instance.new("BillboardGui")
+	tag.Name = "NameTag"
+	tag.Adornee = model.PrimaryPart
+	tag.Size = UDim2.new(0, 240, 0, 100)
+	tag.StudsOffsetWorldSpace = Vector3.new(0, (model:GetAttribute("TopOffset") or 3) + 1, 0)
+	tag.AlwaysOnTop = true
+	tag.Parent = model.PrimaryPart
+
+	local rarityColor = Config.rarityColor(def.Rarity)
+	local nameLine = Instance.new("TextLabel")
+	nameLine.Name = "NameLine"
+	nameLine.Text = def.Name
+	nameLine.Font = Enum.Font.LuckiestGuy
+	nameLine.TextSize = 18
+	nameLine.TextColor3 = rarityColor
+	nameLine.BackgroundTransparency = 1
+	nameLine.Size = UDim2.new(1, 0, 0, 26)
+	nameLine.Position = UDim2.new(0, 0, 0, 0)
+	nameLine.TextStrokeTransparency = 0.3
+	nameLine.Parent = tag
+
+	local infoLine = Instance.new("TextLabel")
+	infoLine.Name = "InfoLine"
+	infoLine.Text = string.upper(def.Rarity) .. "  •  $" .. def.Rate .. "/detik"
+	infoLine.Font = Enum.Font.GothamBold
+	infoLine.TextSize = 15
+	infoLine.TextColor3 = Color3.fromRGB(255, 255, 255)
+	infoLine.BackgroundTransparency = 1
+	infoLine.Size = UDim2.new(1, 0, 0, 22)
+	infoLine.Position = UDim2.new(0, 0, 0, 26)
+	infoLine.TextStrokeTransparency = 0.3
+	infoLine.Parent = tag
+
+	local priceLine = Instance.new("TextLabel")
+	priceLine.Name = "PriceLine"
+	priceLine.Text = "BELI $" .. def.Price
+	priceLine.Font = Enum.Font.GothamBlack
+	priceLine.TextSize = 16
+	priceLine.TextColor3 = Color3.fromRGB(120, 255, 140)
+	priceLine.BackgroundTransparency = 1
+	priceLine.Size = UDim2.new(1, 0, 0, 24)
+	priceLine.Position = UDim2.new(0, 0, 0, 48)
+	priceLine.TextStrokeTransparency = 0.3
+	priceLine.Parent = tag
 end
 
-local function findCharacterDef(key)
-	for _, def in ipairs(Config.CHARACTERS) do
-		if def.key == key then
-			return def
-		end
-	end
-	return Config.CHARACTERS[1]
-end
-
-local function buildCharacterModel(def)
-	local model = Instance.new("Model")
-	model.Name = def.name
-	BUILDERS[def.key](model, def)
-	-- Scale the whole model up 1.4x so the 3D shape reads clearly in the
-	-- bright sunset scene. Parts are still at the model origin, so scaling
-	-- each part's size and its offset from the origin keeps every rotation
-	-- intact.
-	local SCALE = 1.4
-	for _, part in ipairs(model:GetDescendants()) do
-		if part:IsA("BasePart") then
-			part.Size = part.Size * SCALE
-			part.CFrame = CFrame.new(part.Position * SCALE) * (part.CFrame - part.Position)
-		elseif part:IsA("PointLight") then
-			part.Range = part.Range * SCALE
-		end
-	end
-	-- Measure the model's real extents AFTER scaling. The nominal def.size
-	-- is only a rough body height: legs, wheels and plates stick out below
-	-- the body, so the true bounding box is taller and its centre sits
-	-- below the model origin. Placement must rest the bbox BOTTOM on the
-	-- surface, so measure the pivot-to-bbox-bottom distance (BottomOffset)
-	-- and the pivot-to-bbox-top distance (TopOffset). The pivot is the
-	-- PrimaryPart (Body at the model origin), NOT the bbox centre, so
-	-- half the bbox height is the wrong number: it sinks small characters
-	-- into the belt and floats large ones above it.
-	local body = model:FindFirstChild("Body")
-	local bboxCFrame, bboxSize = model:GetBoundingBox()
-	local bboxMinY = bboxCFrame.Y - bboxSize.Y / 2
-	local bboxMaxY = bboxCFrame.Y + bboxSize.Y / 2
-	local pivotY = body and body.Position.Y or 0
-	model:SetAttribute("BottomOffset", pivotY - bboxMinY)
-	model:SetAttribute("TopOffset", bboxMaxY - pivotY)
-	-- Neon glow ring in the rarity colour, added after the scale pass so it
-	-- keeps its own size. Its centre sits 0.2 above the bbox bottom, so
-	-- it always reads as a halo on the belt or pedestal, never sunk inside
-	-- it, and doubles as a rarity indicator at a glance.
-	addCylinder(model, "GlowRing", def.size * 0.62, 0.3, Vector3.new(0, bboxMinY + 0.2, 0), Config.RARITIES[def.rarity].color, "Y", Enum.Material.Neon)
-	model.PrimaryPart = model:FindFirstChild("Body")
-	model:SetAttribute("CharKey", def.key)
-	model:SetAttribute("CharName", def.name)
-	model:SetAttribute("Rarity", def.rarity)
-	model:SetAttribute("Price", def.price)
-	model:SetAttribute("Rate", def.rate)
-	model:SetAttribute("Size", def.size)
-	model:SetAttribute("State", "conveyor")
-	model:SetAttribute("Owner", "")
-	attachNameLabel(model, def)
+-- The prompt every brainrot carries for its whole life. What it does depends
+-- on the model's State attribute when a player triggers it.
+local function attachPrompt(model, def)
 	local prompt = Instance.new("ProximityPrompt")
-	prompt.ActionText = "BELI $" .. def.price
-	prompt.ObjectText = def.name
+	prompt.Name = "BuyPrompt"
+	prompt.ActionText = "BELI $" .. def.Price
+	prompt.ObjectText = def.Name
 	prompt.KeyboardKeyCode = Enum.KeyCode.E
 	prompt.HoldDuration = 0
 	prompt.MaxActivationDistance = 14
 	prompt.RequiresLineOfSight = false
 	prompt.Parent = model.PrimaryPart
-	return model
+	prompt.Triggered:Connect(function(player)
+		local state = model:GetAttribute("State")
+		if state == "conveyor" then
+			Spawner.buy(player, model)
+		elseif state == "placed" then
+			if handlers.take then
+				handlers.take(player, model)
+			end
+		end
+	end)
 end
 
--- One prompt per brainrot for its whole life: on the conveyor it buys, on a
--- lapak it takes (steals from others, picks up your own).
-local function onPromptTriggered(player, model)
-	local state = model:GetAttribute("State")
-	if state == "conveyor" then
-		BrainrotSpawner.tryBuyBrainrot(player, model)
-	elseif state == "placed" then
-		BaseService.tryTakeBrainrot(player, model)
-	end
-end
+-- Build a character model: shape it, scale it, measure it, ring it, label it.
+local function buildModel(def)
+	local model = Instance.new("Model")
+	model.Name = def.Name
 
-local function pickCharacter()
-	local total = 0
-	for _, def in ipairs(Config.CHARACTERS) do
-		total += def.weight
-	end
-	local roll = math.random(1, total)
-	local acc = 0
-	for _, def in ipairs(Config.CHARACTERS) do
-		acc += def.weight
-		if roll <= acc then
-			return def
+	local builder = builders[def.Key]
+	builder(model, def)
+	model.PrimaryPart = model:FindFirstChild("Body")
+
+	-- Scale every part and its offset from the origin together, so the shape
+	-- grows around the origin instead of drifting away from it.
+	for _, descendant in ipairs(model:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			local frame = descendant.CFrame
+			descendant.Size = descendant.Size * SCALE
+			descendant.CFrame = CFrame.new(frame.Position * SCALE) * (frame - frame.Position)
+		elseif descendant:IsA("PointLight") then
+			descendant.Range = descendant.Range * SCALE
 		end
 	end
-	return Config.CHARACTERS[1]
-end
 
-function BrainrotSpawner.spawnBrainrot(startX)
-	local def = pickCharacter()
-	local model = buildCharacterModel(def)
-	local x = startX or Config.CONVEYOR.startX
-	model:PivotTo(CFrame.new(x, Config.CONVEYOR.beltTopY + model:GetAttribute("BottomOffset") + 0.2, Config.CONVEYOR.z) * CFrame.Angles(0, math.rad(90), 0))
-	model.Parent = conveyorFolder
-	local prompt = model.PrimaryPart:FindFirstChildOfClass("ProximityPrompt")
-	if prompt then
-		prompt.Triggered:Connect(function(player)
-			onPromptTriggered(player, model)
-		end)
-	end
-	active[model] = { def = def, x = x, phase = math.random() * 6.28 }
-	return model
-end
+	-- Measure the real bounding box now, before the glow ring goes on.
+	local boxFrame, boxSize = model:GetBoundingBox()
+	local pivotY = model.PrimaryPart.Position.Y
+	local bottomOffset = pivotY - (boxFrame.Position.Y - boxSize.Y / 2)
+	local topOffset = (boxFrame.Position.Y + boxSize.Y / 2) - pivotY
+	model:SetAttribute("BottomOffset", bottomOffset)
+	model:SetAttribute("TopOffset", topOffset)
 
-local function getNotifyRemote()
-	return ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Notify")
-end
+	-- Glowing pad in the rarity colour, just above the model's lowest point.
+	local ringRadius = def.Height * 0.62
+	local ring = Instance.new("Part")
+	ring.Name = "GlowRing"
+	ring.Shape = Enum.PartType.Cylinder
+	ring.Size = Vector3.new(0.3, ringRadius * 2, ringRadius * 2)
+	ring.CFrame = CFrame.new(0, boxFrame.Position.Y - boxSize.Y / 2 + 0.2, 0) * CFrame.Angles(0, 0, math.rad(90))
+	ring.Color = Config.rarityColor(def.Rarity)
+	ring.Material = Enum.Material.Neon
+	ring.Anchored = true
+	ring.CanCollide = false
+	ring.Parent = model
 
-local function notify(player, text, kind)
-	getNotifyRemote():FireClient(player, text, kind)
-end
-
--- Buys the brainrot off the conveyor: pay, then carry it home.
-function BrainrotSpawner.tryBuyBrainrot(player, model)
-	local record = active[model]
-	if not record then
-		return
-	end
-	local def = record.def
-	if #BaseService.getCarried(player) >= BaseService.getCarryCapacity(player) then
-		notify(player, "Tanganmu penuh! Upgrade kapasitas dulu.", "bad")
-		return
-	end
-	if not MoneyService.spendCash(player, def.price) then
-		notify(player, "Uang tidak cukup! Butuh $" .. def.price, "bad")
-		return
-	end
-	active[model] = nil
-	BaseService.carryBrainrot(player, model)
-	notify(player, "Membeli " .. def.name .. "! Bawa ke lapakmu.", "buy")
-end
-
--- A dropped brainrot (tsunami, player left) walks the conveyor again as a
--- free spawn anyone can buy.
-function BrainrotSpawner.returnToConveyor(model)
-	local def = findCharacterDef(model:GetAttribute("CharKey"))
+	model:SetAttribute("CharKey", def.Key)
+	model:SetAttribute("CharName", def.Name)
+	model:SetAttribute("Rarity", def.Rarity)
+	model:SetAttribute("Price", def.Price)
+	model:SetAttribute("Rate", def.Rate)
+	model:SetAttribute("Size", def.Height)
 	model:SetAttribute("State", "conveyor")
 	model:SetAttribute("Owner", "")
-	for _, part in ipairs(model:GetDescendants()) do
-		if part:IsA("BasePart") then
-			part.Anchored = true
-			part.CanCollide = false
-		end
-	end
-	local prompt = model.PrimaryPart:FindFirstChildOfClass("ProximityPrompt")
-	if prompt then
-		prompt.ActionText = "BELI $" .. def.price
-		prompt.Enabled = true
-	end
-	local label = model:FindFirstChild("NameLabel")
-	if label then
-		local priceLine = label:FindFirstChild("PriceLine")
-		if priceLine then
-			priceLine.Visible = true
-		end
-	end
-	model:PivotTo(CFrame.new(Config.CONVEYOR.startX, Config.CONVEYOR.beltTopY + model:GetAttribute("BottomOffset") + 0.2, Config.CONVEYOR.z) * CFrame.Angles(0, math.rad(90), 0))
-	active[model] = { def = def, x = Config.CONVEYOR.startX, phase = math.random() * 6.28 }
+
+	attachLabel(model, def)
+	attachPrompt(model, def)
+	return model
 end
 
-function BrainrotSpawner.start()
-	conveyorFolder = Instance.new("Folder")
-	conveyorFolder.Name = "ConveyorBrainrots"
-	conveyorFolder.Parent = Workspace
-	-- Walk every conveyor brainrot toward the far end, with a bob and wobble.
+-- Weighted random pick across the nine characters.
+local function pickCharacter()
+	local total = 0
+	for _, character in ipairs(Config.Characters) do
+		total = total + character.Weight
+	end
+	local roll = math.random() * total
+	for _, character in ipairs(Config.Characters) do
+		roll = roll - character.Weight
+		if roll <= 0 then
+			return character
+		end
+	end
+	return Config.Characters[1]
+end
+
+-- Put a fresh brainrot on the belt at x, resting its measured bottom on the
+-- belt top with a small gap, facing along the belt.
+local function spawnAt(x)
+	local def = pickCharacter()
+	local model = buildModel(def)
+	local restY = Config.Belt.TopY + 0.2 + (model:GetAttribute("BottomOffset") or 0)
+	model:PivotTo(CFrame.new(x, restY, 0) * CFrame.Angles(0, math.rad(90), 0))
+	model.Parent = workspace
+	local entry = { Model = model, X = x, Phase = math.random() * math.pi * 2, BaseY = restY }
+	table.insert(active, entry)
+	activeByModel[model] = entry
+	return model
+end
+
+local function removeFromBelt(model)
+	local entry = activeByModel[model]
+	if not entry then
+		return
+	end
+	for i, other in ipairs(active) do
+		if other == entry then
+			table.remove(active, i)
+			break
+		end
+	end
+	activeByModel[model] = nil
+end
+
+-- Buying: hands not full, money enough, then it leaves the belt and rides
+-- above the player's head.
+function Spawner.buy(player, model)
+	if model:GetAttribute("State") ~= "conveyor" then
+		return
+	end
+	if handlers.canCarry and not handlers.canCarry(player) then
+		Notify:FireClient(player, "Tanganmu penuh! Taruh dulu yang kamu bawa.", "bad")
+		return
+	end
+	local price = model:GetAttribute("Price") or 0
+	if not MoneyService.spend(player, price) then
+		Notify:FireClient(player, "Uangmu tidak cukup! Butuh $" .. price .. ".", "bad")
+		return
+	end
+	removeFromBelt(model)
+	model:SetAttribute("State", "carried")
+	if handlers.carry then
+		handlers.carry(player, model)
+	end
+	Notify:FireClient(player, "Kamu membeli " .. (model:GetAttribute("CharName") or "?") .. "!", "buy")
+end
+
+-- A dropped brainrot (tsunami, player left) goes back to the belt start as a
+-- fresh free spawn anyone can buy.
+function Spawner.returnToBelt(model)
+	if not model or not model.Parent then
+		return
+	end
+	for _, descendant in ipairs(model:GetDescendants()) do
+		if descendant:IsA("WeldConstraint") then
+			descendant:Destroy()
+		end
+	end
+	for _, descendant in ipairs(model:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.Anchored = true
+			descendant.CanCollide = false
+			descendant.Massless = false
+		end
+	end
+	model:SetAttribute("State", "conveyor")
+	model:SetAttribute("Owner", "")
+	local price = model:GetAttribute("Price") or 0
+	local primary = model.PrimaryPart
+	local prompt = primary and primary:FindFirstChild("BuyPrompt")
+	if prompt then
+		prompt.ActionText = "BELI $" .. price
+		prompt.Enabled = true
+	end
+	local tag = primary and primary:FindFirstChild("NameTag")
+	local priceLine = tag and tag:FindFirstChild("PriceLine")
+	if priceLine then
+		priceLine.Visible = true
+	end
+	local restY = Config.Belt.TopY + 0.2 + (model:GetAttribute("BottomOffset") or 0)
+	model:PivotTo(CFrame.new(Config.Belt.StartX, restY, 0) * CFrame.Angles(0, math.rad(90), 0))
+	local entry = { Model = model, X = Config.Belt.StartX, Phase = math.random() * math.pi * 2, BaseY = restY }
+	table.insert(active, entry)
+	activeByModel[model] = entry
+end
+
+function Spawner.init(injected)
+	handlers = injected
+end
+
+function Spawner.start()
+	for _, x in ipairs(Config.Belt.Preseed) do
+		spawnAt(x)
+	end
+	task.spawn(function()
+		while true do
+			task.wait(Config.Belt.SpawnEvery)
+			if #active < Config.Belt.MaxOnBelt then
+				spawnAt(Config.Belt.StartX)
+			end
+		end
+	end)
 	RunService.Heartbeat:Connect(function(dt)
-		local now = os.clock()
-		for model, record in pairs(active) do
+		for i = #active, 1, -1 do
+			local entry = active[i]
+			local model = entry.Model
 			if not model.Parent then
-				active[model] = nil
+				table.remove(active, i)
+				activeByModel[model] = nil
 			else
-				record.x += Config.CONVEYOR.speed * dt
-				if record.x >= Config.CONVEYOR.endX then
-					active[model] = nil
+				entry.X = entry.X + Config.Belt.Speed * dt
+				entry.Phase = entry.Phase + dt * 6
+				if entry.X >= Config.Belt.EndX then
 					model:Destroy()
+					table.remove(active, i)
+					activeByModel[model] = nil
 				else
-					local bob = math.sin(now * 4 + record.phase) * 0.15
-					local wobble = math.sin(now * 6 + record.phase) * 0.08
-					model:PivotTo(CFrame.new(record.x, Config.CONVEYOR.beltTopY + model:GetAttribute("BottomOffset") + 0.2 + bob, Config.CONVEYOR.z) * CFrame.Angles(0, math.rad(90), wobble))
+					local bob = math.sin(entry.Phase) * 0.15
+					local wobble = math.sin(entry.Phase * 0.7) * 0.08
+					model:PivotTo(CFrame.new(entry.X, entry.BaseY + bob, 0) * CFrame.Angles(0, math.rad(90), wobble))
 				end
 			end
 		end
 	end)
-	-- Spawn a fresh brainrot every few seconds, up to the cap.
-	task.spawn(function()
-		while true do
-			task.wait(Config.SPAWN_INTERVAL)
-			local count = 0
-			for _ in pairs(active) do
-				count += 1
-			end
-			if count < Config.MAX_ON_CONVEYOR then
-				BrainrotSpawner.spawnBrainrot()
-			end
-		end
-	end)
-	-- Pre-seed the belt so the market is alive from the first second.
-	BrainrotSpawner.spawnBrainrot(-72)
-	BrainrotSpawner.spawnBrainrot(-45)
-	BrainrotSpawner.spawnBrainrot(-18)
-	BrainrotSpawner.spawnBrainrot(9)
 end
 
-return BrainrotSpawner
+return Spawner

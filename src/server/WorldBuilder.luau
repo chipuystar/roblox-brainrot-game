@@ -1,40 +1,48 @@
--- Pasar Brainrot: builds the sunset market in 3D at runtime.
--- The conveyor belt, six player lapak (bases) with pedestals, lamp posts,
--- food stalls, the welcome arch and decorations are all plain Parts, so the
--- place stays light and the whole world is readable from this one module.
+-- WorldBuilder.luau
+-- Builds the whole night market out of plain Roblox parts at runtime: the
+-- raised conveyor, six coloured lapak, lamps, food stalls, the welcome arch
+-- and decorations. The baseplate and spawn pad come from default.project.json;
+-- everything else is built here so the place file stays small.
+--
+-- Returns the six lapak records: each holds its centre, colour, pedestals
+-- (with their top positions) and the three lines of its wooden sign, so the
+-- lapak service can update owners and locks later.
+
+local Config = require(script.Parent.Config)
 
 local WorldBuilder = {}
 
-local Config = require(script.Parent.Config)
-local Workspace = game:GetService("Workspace")
+local GOLD = Color3.fromRGB(255, 183, 3)
+local PINK = Color3.fromRGB(255, 77, 109)
+local CYAN = Color3.fromRGB(76, 201, 240)
+local STONE_GREY = Color3.fromRGB(115, 115, 125)
+local WOOD_BROWN = Color3.fromRGB(150, 100, 55)
 
--- Palette: deliberately LIGHT and saturated against the purple baseplate so
--- every surface reads at sunset. (The DARK_* names are historic; the values
--- are light now for contrast.)
-local DARK_FLOOR = Color3.fromRGB(195, 185, 215)
-local DARK_STONE = Color3.fromRGB(175, 165, 195)
-local BELT_ORANGE = Color3.fromRGB(230, 120, 30)
-local WOOD = Color3.fromRGB(120, 80, 45)
-local WARM_LIGHT = Color3.fromRGB(255, 200, 90)
-local NEON_PINK = Color3.fromRGB(255, 80, 160)
-local NEON_CYAN = Color3.fromRGB(80, 220, 255)
-
-local function newPart(parent, name, size, position, color, material)
+-- One helper for every static part: size, position, colour, material, shape,
+-- whether it blocks movement. Rotation is a CFrame multiplied after the
+-- position, so it spins around the part's own centre.
+local function addPart(parent, name, size, position, color, material, shape, collide, rotation)
 	local part = Instance.new("Part")
 	part.Name = name
 	part.Size = size
-	part.Position = position
+	if rotation then
+		part.CFrame = CFrame.new(position) * rotation
+	else
+		part.CFrame = CFrame.new(position)
+	end
 	part.Color = color
 	part.Material = material or Enum.Material.SmoothPlastic
+	if shape then
+		part.Shape = shape
+	end
 	part.Anchored = true
-	part.CanCollide = true
-	part.TopSurface = Enum.SurfaceType.Smooth
-	part.BottomSurface = Enum.SurfaceType.Smooth
+	part.CanCollide = collide ~= false
 	part.Parent = parent
 	return part
 end
 
-local function addPointLight(parent, color, range, brightness)
+-- A point light parented to a part, in that part's own colour by default.
+local function addLight(parent, color, range, brightness)
 	local light = Instance.new("PointLight")
 	light.Color = color
 	light.Range = range
@@ -43,292 +51,250 @@ local function addPointLight(parent, color, range, brightness)
 	return light
 end
 
--- A floating text board that always faces the camera.
-local function addBillboard(part, title, titleColor, subtitle, sizeY)
-	local gui = Instance.new("BillboardGui")
-	gui.Name = "Sign"
-	gui.Size = UDim2.fromOffset(220, sizeY or 70)
-	gui.StudsOffset = Vector3.new(0, 2.5, 0)
-	gui.AlwaysOnTop = true
-	gui.Parent = part
-	local titleLabel = Instance.new("TextLabel")
-	titleLabel.Name = "Title"
-	titleLabel.Size = UDim2.new(1, 0, 0.6, 0)
-	titleLabel.BackgroundTransparency = 1
-	titleLabel.Text = title
-	titleLabel.TextColor3 = titleColor
-	titleLabel.TextSize = 26
-	titleLabel.Font = Enum.Font.LuckiestGuy
-	titleLabel.TextStrokeTransparency = 0.2
-	titleLabel.Parent = gui
-	local subLabel = Instance.new("TextLabel")
-	subLabel.Name = "Subtitle"
-	subLabel.Position = UDim2.new(0, 0, 0.6, 0)
-	subLabel.Size = UDim2.new(1, 0, 0.4, 0)
-	subLabel.BackgroundTransparency = 1
-	subLabel.Text = subtitle
-	subLabel.TextColor3 = Color3.fromRGB(240, 235, 255)
-	subLabel.TextSize = 16
-	subLabel.Font = Enum.Font.GothamBold
-	subLabel.TextStrokeTransparency = 0.2
-	subLabel.Parent = gui
-	return gui
+-- One line of a floating billboard sign.
+local function addSignLine(gui, text, font, size, color, yOffset, height)
+	local line = Instance.new("TextLabel")
+	line.Text = text
+	line.Font = font
+	line.TextSize = size
+	line.TextColor3 = color
+	line.BackgroundTransparency = 1
+	line.Size = UDim2.new(1, 0, 0, height)
+	line.Position = UDim2.new(0, 0, 0, yOffset)
+	line.TextStrokeTransparency = 0.4
+	line.Parent = gui
+	return line
 end
 
-local function buildConveyorBelt(folder)
-	-- The belt is a RAISED machine (3 studs tall, top at y=3), not a floor
-	-- stripe: the old 1-stud belt read as flat ground from eye level. Muted
-	-- orange against the purple baseplate, with gold side skirts and warm
-	-- yellow edges. The top here (y=3) must match
-	-- Config.CONVEYOR.beltTopY; the spawner reads it for every placement.
-	newPart(folder, "Belt", Vector3.new(150, 3, 10), Vector3.new(0, 1.5, 0), BELT_ORANGE, Enum.Material.SmoothPlastic)
-	-- Gold side skirts: muted gold strips along both flanks so the belt
-	-- reads as a raised machine from the side. Non-colliding trim.
-	local skirtNorth = newPart(folder, "SkirtNorth", Vector3.new(150, 1, 0.3), Vector3.new(0, 1.5, -5.1), Color3.fromRGB(180, 140, 40), Enum.Material.SmoothPlastic)
-	skirtNorth.CanCollide = false
-	local skirtSouth = newPart(folder, "SkirtSouth", Vector3.new(150, 1, 0.3), Vector3.new(0, 1.5, 5.1), Color3.fromRGB(180, 140, 40), Enum.Material.SmoothPlastic)
-	skirtSouth.CanCollide = false
-	newPart(folder, "EdgeNorth", Vector3.new(150, 0.8, 0.6), Vector3.new(0, 3.4, -4.9), Color3.fromRGB(200, 160, 60), Enum.Material.SmoothPlastic)
-	newPart(folder, "EdgeSouth", Vector3.new(150, 0.8, 0.6), Vector3.new(0, 3.4, 4.9), Color3.fromRGB(200, 160, 60), Enum.Material.SmoothPlastic)
-	-- Direction chevrons on the belt so players read which way it runs.
-	for i = 1, 7 do
-		local x = -60 + (i - 1) * 20
-		local chevron = newPart(folder, "Chevron" .. i, Vector3.new(3, 0.15, 5), Vector3.new(x, 3.08, 0), Color3.fromRGB(255, 183, 3), Enum.Material.Neon)
-		chevron.CanCollide = false
-	end
-	-- End posts with lamps, standing ON the belt ends (x=±74, past the
-	-- brainrot walk range of -72..72) so the belt reads as a finished
-	-- machine from far away.
-	for _, x in ipairs({ -74, 74 }) do
-		newPart(folder, "EndPost" .. x, Vector3.new(1, 5, 1), Vector3.new(x, 5.5, -4.5), DARK_STONE)
-		newPart(folder, "EndPost" .. x .. "B", Vector3.new(1, 5, 1), Vector3.new(x, 5.5, 4.5), DARK_STONE)
-		local lamp = newPart(folder, "EndLamp" .. x, Vector3.new(1.6, 1, 1.6), Vector3.new(x, 8.5, 0), NEON_PINK, Enum.Material.Neon)
-		addPointLight(lamp, NEON_PINK, 18, 1.5)
-	end
-end
+-- The raised orange conveyor with gold skirts, glowing edge strips, direction
+-- chevrons and lamp-topped posts at both ends.
+local function buildBelt(world)
+	local belt = Instance.new("Folder")
+	belt.Name = "Belt"
+	belt.Parent = world
 
-local function buildPlayerBase(folder, index, def)
-	local baseFolder = Instance.new("Folder")
-	baseFolder.Name = "Base" .. index
-	baseFolder.Parent = folder
-
-	local center = Vector3.new(def.x, 0, def.z)
-	-- Coloured outline plate under the platform. It sits ON the floor
-	-- (centre y 0.4, 0.8 thick) so no part of it sinks below y=0.
-	newPart(baseFolder, "Outline", Vector3.new(27, 0.8, 21), Vector3.new(def.x, 0.4, def.z), def.color, Enum.Material.Neon)
-	newPart(baseFolder, "Platform", Vector3.new(26, 1, 20), Vector3.new(def.x, 0.5, def.z), DARK_FLOOR, Enum.Material.Concrete)
-	-- Coloured perimeter on the platform top so the lapak's boundary is
-	-- unmistakable from across the market. The side strips run between the
-	-- end strips (18.8 long) so the corners are not doubled up. The strips
-	-- are non-colliding trim: players walk straight over the 0.5 lip.
-	local trimNorth = newPart(baseFolder, "TrimNorth", Vector3.new(26, 0.5, 0.6), Vector3.new(def.x, 1.25, def.z - 9.7), def.color, Enum.Material.SmoothPlastic)
-	trimNorth.CanCollide = false
-	local trimSouth = newPart(baseFolder, "TrimSouth", Vector3.new(26, 0.5, 0.6), Vector3.new(def.x, 1.25, def.z + 9.7), def.color, Enum.Material.SmoothPlastic)
-	trimSouth.CanCollide = false
-	local trimWest = newPart(baseFolder, "TrimWest", Vector3.new(0.6, 0.5, 18.8), Vector3.new(def.x - 12.7, 1.25, def.z), def.color, Enum.Material.SmoothPlastic)
-	trimWest.CanCollide = false
-	local trimEast = newPart(baseFolder, "TrimEast", Vector3.new(0.6, 0.5, 18.8), Vector3.new(def.x + 12.7, 1.25, def.z), def.color, Enum.Material.SmoothPlastic)
-	trimEast.CanCollide = false
-	-- Tall corner posts with glowing tips, so each lapak reads as a
-	-- structure from a distance. (No roof: the tallest brainrots would
-	-- clip through it.)
-	for _, sx in ipairs({ -1, 1 }) do
-		for _, sz in ipairs({ -1, 1 }) do
-			newPart(baseFolder, "CornerPost", Vector3.new(0.8, 9, 0.8), Vector3.new(def.x + sx * 12.5, 4.5, def.z + sz * 9.5), DARK_STONE)
-			newPart(baseFolder, "CornerTip", Vector3.new(2, 1, 2), Vector3.new(def.x + sx * 12.5, 9.5, def.z + sz * 9.5), def.color, Enum.Material.Neon)
+	addPart(belt, "Body", Vector3.new(150, 3, 10), Vector3.new(0, 1.5, 0), Color3.fromRGB(230, 120, 30))
+	for _, side in ipairs({ -1, 1 }) do
+		addPart(belt, "Skirt", Vector3.new(150, 1, 0.3), Vector3.new(0, 1.5, side * 5.1), GOLD, Enum.Material.Neon, nil, false)
+		addPart(belt, "Edge", Vector3.new(150, 0.8, 0.6), Vector3.new(0, 3.4, side * 4.9), Color3.fromRGB(255, 220, 80), Enum.Material.Neon, nil, false)
+	end
+	for x = -60, 60, 20 do
+		addPart(belt, "Chevron", Vector3.new(3, 0.15, 5), Vector3.new(x, 3.08, 0), GOLD, Enum.Material.Neon, nil, false)
+	end
+	for _, endX in ipairs({ -74, 74 }) do
+		for _, endZ in ipairs({ -4.5, 4.5 }) do
+			addPart(belt, "EndPost", Vector3.new(1, 5, 1), Vector3.new(endX, 5.5, endZ), STONE_GREY, Enum.Material.Slate)
+			local lamp = addPart(belt, "EndLamp", Vector3.new(1.6, 1, 1.6), Vector3.new(endX, 8.5, endZ), PINK, Enum.Material.Neon)
+			addLight(lamp, PINK, 18, 1.5)
 		end
 	end
-	-- Tall flag pole at the lapak's outer corner so every lapak reads as a
-	-- structure from across the market: a 10-stud pole with a large
-	-- base-colour banner near the top. It stands just outside the platform
-	-- corner (x +14.5, outer z ±11.5) so it never clips the corner posts
-	-- or the sign.
-	local outerZ = def.z < 0 and -1 or 1
-	local flagX = def.x + 14.5
-	local flagZ = def.z + outerZ * 11.5
-	newPart(baseFolder, "FlagPole", Vector3.new(0.4, 10, 0.4), Vector3.new(flagX, 5, flagZ), DARK_STONE)
-	newPart(baseFolder, "FlagBanner", Vector3.new(3, 2, 0.2), Vector3.new(flagX - 1.7, 9, flagZ), def.color, Enum.Material.Neon)
-	-- Six pedestals, two rows of three.
-	local pedestals = {}
-	for i, off in ipairs(Config.PEDESTAL_OFFSETS) do
-		local px = def.x + off.x
-		local pz = def.z + off.z
-		newPart(baseFolder, "Pedestal" .. i, Vector3.new(5, 1, 5), Vector3.new(px, 1.5, pz), DARK_STONE, Enum.Material.Marble)
-		newPart(baseFolder, "PedestalTop" .. i, Vector3.new(5.3, 0.6, 5.3), Vector3.new(px, 2.3, pz), def.color, Enum.Material.SmoothPlastic)
-		pedestals[i] = Vector3.new(px, 2.6, pz)
+end
+
+-- One lapak: neon outline, concrete platform, glowing trim, corner posts with
+-- lit tips, a flag, six pedestals and a wooden sign with a floating billboard.
+local function buildBase(world, index, def)
+	local folder = Instance.new("Folder")
+	folder.Name = "Lapak" .. index
+	folder.Parent = world
+
+	local cx, cz = def.X, def.Z
+	local color = def.Color
+	-- The side away from the belt: north lapak face -Z, south lapak face +Z.
+	local outward = cz < 0 and -1 or 1
+
+	addPart(folder, "Outline", Vector3.new(27, 0.8, 21), Vector3.new(cx, 0.4, cz), color, Enum.Material.Neon)
+	addPart(folder, "Platform", Vector3.new(26, 1, 20), Vector3.new(cx, 0.5, cz), Color3.fromRGB(215, 210, 205), Enum.Material.Concrete)
+	addPart(folder, "TrimNorth", Vector3.new(26, 0.5, 0.6), Vector3.new(cx, 1.25, cz - 9.7), color, Enum.Material.Neon, nil, false)
+	addPart(folder, "TrimSouth", Vector3.new(26, 0.5, 0.6), Vector3.new(cx, 1.25, cz + 9.7), color, Enum.Material.Neon, nil, false)
+	addPart(folder, "TrimWest", Vector3.new(0.6, 0.5, 18.8), Vector3.new(cx - 12.7, 1.25, cz), color, Enum.Material.Neon, nil, false)
+	addPart(folder, "TrimEast", Vector3.new(0.6, 0.5, 18.8), Vector3.new(cx + 12.7, 1.25, cz), color, Enum.Material.Neon, nil, false)
+
+	for _, px in ipairs({ -12.5, 12.5 }) do
+		for _, pz in ipairs({ -9.5, 9.5 }) do
+			addPart(folder, "CornerPost", Vector3.new(0.8, 9, 0.8), Vector3.new(cx + px, 4.5, cz + pz), Color3.fromRGB(200, 200, 205))
+			addPart(folder, "CornerTip", Vector3.new(2, 1, 2), Vector3.new(cx + px, 9.5, cz + pz), color, Enum.Material.Neon)
+		end
 	end
-	-- Sign on the outer edge, facing the market.
-	local signZ = def.z + (def.z < 0 and -11 or 11)
-	newPart(baseFolder, "SignPostA", Vector3.new(0.5, 5, 0.5), Vector3.new(def.x - 4, 2.5, signZ), WOOD)
-	newPart(baseFolder, "SignPostB", Vector3.new(0.5, 5, 0.5), Vector3.new(def.x + 4, 2.5, signZ), WOOD)
-	local board = newPart(baseFolder, "SignBoard", Vector3.new(10, 3, 0.4), Vector3.new(def.x, 5.5, signZ), Color3.fromRGB(150, 105, 60), Enum.Material.WoodPlanks)
-	local gui = addBillboard(board, "LAPAK " .. index, def.color, "Kosong", 70)
-	-- Lock line, hidden until the base is locked.
-	local lockLabel = Instance.new("TextLabel")
-	lockLabel.Name = "LockLine"
-	lockLabel.Position = UDim2.new(0, 0, 1, 0)
-	lockLabel.Size = UDim2.new(1, 0, 0.4, 0)
-	lockLabel.BackgroundTransparency = 1
-	lockLabel.Text = "TERKUNCI"
-	lockLabel.TextColor3 = NEON_CYAN
-	lockLabel.TextSize = 15
-	lockLabel.Font = Enum.Font.GothamBlack
-	lockLabel.Visible = false
-	lockLabel.Parent = gui
+
+	local poleX = cx + 14.5
+	local poleZ = cz + outward * 11.5
+	addPart(folder, "FlagPole", Vector3.new(0.4, 10, 0.4), Vector3.new(poleX, 5, poleZ), Color3.fromRGB(90, 85, 95))
+	addPart(folder, "FlagBanner", Vector3.new(3, 2, 0.2), Vector3.new(poleX - 1.7, 9, poleZ), color, Enum.Material.Neon)
+
+	local pedestals = {}
+	for _, offset in ipairs(Config.PedestalOffsets) do
+		local px, pz = cx + offset.X, cz + offset.Z
+		addPart(folder, "Pedestal", Vector3.new(5, 1, 5), Vector3.new(px, 1.5, pz), Color3.fromRGB(200, 195, 190), Enum.Material.Marble)
+		addPart(folder, "PedestalTop", Vector3.new(5.3, 0.6, 5.3), Vector3.new(px, 2.3, pz), color, Enum.Material.Neon)
+		table.insert(pedestals, { Top = Vector3.new(px, 2.6, pz), Model = nil })
+	end
+
+	-- Wooden sign on the outer edge, facing the market.
+	local signZ = cz + outward * 11
+	addPart(folder, "SignPost", Vector3.new(0.5, 5, 0.5), Vector3.new(cx - 4, 2.5, signZ), WOOD_BROWN, Enum.Material.Wood)
+	addPart(folder, "SignPost", Vector3.new(0.5, 5, 0.5), Vector3.new(cx + 4, 2.5, signZ), WOOD_BROWN, Enum.Material.Wood)
+	local board = addPart(folder, "SignBoard", Vector3.new(10, 3, 0.4), Vector3.new(cx, 5.5, signZ), Color3.fromRGB(160, 110, 60), Enum.Material.Wood)
+
+	local sign = Instance.new("BillboardGui")
+	sign.Adornee = board
+	sign.Size = UDim2.new(0, 320, 0, 130)
+	sign.StudsOffsetWorldSpace = Vector3.new(0, 2.5, 0)
+	sign.AlwaysOnTop = true
+	sign.Parent = board
+	local nameLine = addSignLine(sign, "LAPAK " .. index, Enum.Font.LuckiestGuy, 34, color, 0, 46)
+	local ownerLine = addSignLine(sign, "Kosong", Enum.Font.GothamBold, 20, Color3.fromRGB(255, 255, 255), 48, 28)
+	local lockLine = addSignLine(sign, "TERKUNCI", Enum.Font.GothamBlack, 22, CYAN, 78, 30)
+	lockLine.Visible = false
 
 	return {
-		index = index,
-		center = center,
-		color = def.color,
-		pedestals = pedestals,
-		signTitle = gui.Title,
-		signOwner = gui.Subtitle,
-		lockLabel = lockLabel,
-		owner = nil,
-		lockedUntil = 0,
-		lockAvailableAt = 0,
+		Index = index,
+		Center = Vector3.new(cx, 0, cz),
+		Color = color,
+		Pedestals = pedestals,
+		NameLabel = nameLine,
+		OwnerLabel = ownerLine,
+		LockLabel = lockLine,
+		LockedUntil = 0,
+		CooldownUntil = 0,
 	}
 end
 
-local function buildLampPosts(folder)
-	local lampColors = { WARM_LIGHT, NEON_PINK, NEON_CYAN, WARM_LIGHT, NEON_PINK }
+-- Five pairs of lamp posts along the belt, their neon heads cycling
+-- gold, pink, cyan, gold, pink.
+local function buildLamps(world)
+	local lamps = Instance.new("Folder")
+	lamps.Name = "Lamps"
+	lamps.Parent = world
+	local headColors = { GOLD, PINK, CYAN, GOLD, PINK }
 	for i, x in ipairs({ -60, -30, 0, 30, 60 }) do
+		local headColor = headColors[i]
 		for _, z in ipairs({ -8, 8 }) do
-			local color = lampColors[i]
-			newPart(folder, "LampPole", Vector3.new(0.5, 8, 0.5), Vector3.new(x, 4, z), DARK_STONE)
-			local head = newPart(folder, "LampHead", Vector3.new(1.5, 1.5, 1.5), Vector3.new(x, 9.1, z), color, Enum.Material.Neon)
-			addPointLight(head, color, 18, 1.2)
+			addPart(lamps, "LampPole", Vector3.new(0.5, 8, 0.5), Vector3.new(x, 4, z), STONE_GREY, Enum.Material.Slate)
+			local head = addPart(lamps, "LampHead", Vector3.new(1.5, 1.5, 1.5), Vector3.new(x, 9.1, z), headColor, Enum.Material.Neon)
+			addLight(head, headColor, 18, 1.2)
 		end
 	end
 end
 
-local function buildFoodStalls(folder)
-	local stallDefs = {
-		{ x = -85, z = -42, roof = Color3.fromRGB(220, 60, 60) },
-		{ x = 85, z = -42, roof = Color3.fromRGB(60, 180, 180) },
-		{ x = -85, z = 42, roof = Color3.fromRGB(240, 200, 60) },
-		{ x = 85, z = 42, roof = Color3.fromRGB(160, 80, 220) },
+-- Four food stalls at the market corners, each with its own roof colour,
+-- a counter with goods and a row of warm glowing orbs.
+local function buildStalls(world)
+	local stalls = Instance.new("Folder")
+	stalls.Name = "Stalls"
+	stalls.Parent = world
+	local defs = {
+		{ X = -85, Z = -42, Roof = Color3.fromRGB(255, 60, 60) },
+		{ X = 85, Z = -42, Roof = Color3.fromRGB(0, 200, 180) },
+		{ X = -85, Z = 42, Roof = Color3.fromRGB(255, 220, 0) },
+		{ X = 85, Z = 42, Roof = Color3.fromRGB(157, 78, 221) },
 	}
-	for i, def in ipairs(stallDefs) do
+	local goodsColors = { Color3.fromRGB(120, 220, 110), Color3.fromRGB(255, 140, 40), Color3.fromRGB(255, 120, 180) }
+	for i, def in ipairs(defs) do
 		local stall = Instance.new("Folder")
 		stall.Name = "Stall" .. i
-		stall.Parent = folder
-		for _, sx in ipairs({ -4, 4 }) do
-			for _, sz in ipairs({ -3, 3 }) do
-				newPart(stall, "Post", Vector3.new(0.5, 5, 0.5), Vector3.new(def.x + sx, 2.5, def.z + sz), WOOD)
+		stall.Parent = stalls
+		for _, px in ipairs({ -4, 4 }) do
+			for _, pz in ipairs({ -3, 3 }) do
+				addPart(stall, "Post", Vector3.new(0.5, 5, 0.5), Vector3.new(def.X + px, 2.5, def.Z + pz), WOOD_BROWN, Enum.Material.Wood)
 			end
 		end
-		newPart(stall, "Roof", Vector3.new(10, 0.5, 8), Vector3.new(def.x, 5.2, def.z), def.roof, Enum.Material.SmoothPlastic)
-		newPart(stall, "Counter", Vector3.new(8, 2.5, 3), Vector3.new(def.x, 1.25, def.z), WOOD, Enum.Material.WoodPlanks)
-		-- Goods on the counter: little colourful boxes.
-		local goods = { Color3.fromRGB(150, 100, 60), Color3.fromRGB(240, 190, 60), Color3.fromRGB(90, 160, 60) }
-		for j, gc in ipairs(goods) do
-			newPart(stall, "Goods" .. j, Vector3.new(1.4, 1.2, 1.4), Vector3.new(def.x - 2.5 + (j - 1) * 2.5, 3.1, def.z), gc)
+		addPart(stall, "Roof", Vector3.new(10, 0.5, 8), Vector3.new(def.X, 5.2, def.Z), def.Roof)
+		addPart(stall, "Counter", Vector3.new(8, 2.5, 3), Vector3.new(def.X, 1.25, def.Z), WOOD_BROWN, Enum.Material.Wood)
+		for j, gx in ipairs({ -2.5, 0, 2.5 }) do
+			addPart(stall, "Goods", Vector3.new(1, 1, 1), Vector3.new(def.X + gx, 3, def.Z), goodsColors[j])
 		end
-		-- A string of glowing orbs along the roof edge.
-		for j = 1, 5 do
-			local orb = newPart(stall, "Orb" .. j, Vector3.new(0.5, 0.5, 0.5), Vector3.new(def.x - 4 + (j - 1) * 2, 4.6, def.z + 4), WARM_LIGHT, Enum.Material.Neon)
-			orb.Shape = Enum.PartType.Ball
-			orb.CanCollide = false
+		-- Warm orbs along the front roof edge, the edge facing the market.
+		local frontZ = def.Z < 0 and def.Z + 4 or def.Z - 4
+		for _, ox in ipairs({ -4, -2, 0, 2, 4 }) do
+			addPart(stall, "Orb", Vector3.new(0.6, 0.6, 0.6), Vector3.new(def.X + ox, 5.2, frontZ), Color3.fromRGB(255, 200, 100), Enum.Material.Neon, Enum.PartType.Ball, false)
 		end
 	end
 end
 
-local function buildWelcomeArch(folder)
-	newPart(folder, "ArchPillarL", Vector3.new(1.5, 9, 1.5), Vector3.new(-7, 4.5, 44), DARK_STONE, Enum.Material.Concrete)
-	newPart(folder, "ArchPillarR", Vector3.new(1.5, 9, 1.5), Vector3.new(7, 4.5, 44), DARK_STONE, Enum.Material.Concrete)
-	local beam = newPart(folder, "ArchBeam", Vector3.new(16, 1.5, 1.5), Vector3.new(0, 9.5, 44), Color3.fromRGB(40, 28, 70), Enum.Material.Concrete)
-	addBillboard(beam, "PASAR BRAINROT", Color3.fromRGB(255, 183, 3), "BELI  •  BAWA  •  KAYA", 80)
-	local lampL = newPart(folder, "ArchLampL", Vector3.new(1.2, 1.2, 1.2), Vector3.new(-7, 9.8, 44), NEON_PINK, Enum.Material.Neon)
-	addPointLight(lampL, NEON_PINK, 16, 1.5)
-	local lampR = newPart(folder, "ArchLampR", Vector3.new(1.2, 1.2, 1.2), Vector3.new(7, 9.8, 44), NEON_CYAN, Enum.Material.Neon)
-	addPointLight(lampR, NEON_CYAN, 16, 1.5)
+-- The welcome arch at the south end: stone pillars, a dark beam, the
+-- market's name in gold and a lamp of each accent colour on the beam ends.
+local function buildArch(world)
+	local arch = Instance.new("Folder")
+	arch.Name = "Arch"
+	arch.Parent = world
+	addPart(arch, "Pillar", Vector3.new(1.5, 9, 1.5), Vector3.new(-7, 4.5, 44), Color3.fromRGB(90, 85, 100), Enum.Material.Slate)
+	addPart(arch, "Pillar", Vector3.new(1.5, 9, 1.5), Vector3.new(7, 4.5, 44), Color3.fromRGB(90, 85, 100), Enum.Material.Slate)
+	local beam = addPart(arch, "Beam", Vector3.new(16, 1.5, 1.5), Vector3.new(0, 9.5, 44), Color3.fromRGB(45, 35, 65))
+	local sign = Instance.new("BillboardGui")
+	sign.Adornee = beam
+	sign.Size = UDim2.new(0, 460, 0, 100)
+	sign.StudsOffsetWorldSpace = Vector3.new(0, 2.5, 0)
+	sign.AlwaysOnTop = true
+	sign.Parent = beam
+	addSignLine(sign, "PASAR BRAINROT", Enum.Font.LuckiestGuy, 40, GOLD, 0, 52)
+	addSignLine(sign, "BELI • BAWA • KAYA", Enum.Font.GothamBold, 20, Color3.fromRGB(255, 255, 255), 54, 28)
+	local pinkLamp = addPart(arch, "Lamp", Vector3.new(1, 1, 1), Vector3.new(-7.5, 10.6, 44), PINK, Enum.Material.Neon)
+	addLight(pinkLamp, PINK, 15, 1.2)
+	local cyanLamp = addPart(arch, "Lamp", Vector3.new(1, 1, 1), Vector3.new(7.5, 10.6, 44), CYAN, Enum.Material.Neon)
+	addLight(cyanLamp, CYAN, 15, 1.2)
 end
 
-local function buildDecorations(folder)
-	-- Crates and barrels scattered around the market edges.
-	local crateSpots = {
-		{ x = -78, z = -14 }, { x = -75, z = -10 }, { x = 78, z = 14 },
-		{ x = 75, z = 10 }, { x = -40, z = 44 }, { x = 40, z = -44 },
+-- Crates and barrels scattered near the market edges, plus a starfield of
+-- small glowing balls high above the market.
+local function buildDecor(world)
+	local decor = Instance.new("Folder")
+	decor.Name = "Decor"
+	decor.Parent = world
+	local crates = {
+		{ X = -95, Z = -15, Turn = 15 },
+		{ X = 95, Z = -20, Turn = 30 },
+		{ X = -95, Z = 20, Turn = 45 },
+		{ X = 95, Z = 15, Turn = 10 },
+		{ X = -40, Z = 55, Turn = 25 },
+		{ X = 45, Z = -55, Turn = 40 },
 	}
-	for i, spot in ipairs(crateSpots) do
-		newPart(folder, "Crate" .. i, Vector3.new(3, 3, 3), Vector3.new(spot.x, 1.5, spot.z), WOOD, Enum.Material.WoodPlanks)
+	for _, crate in ipairs(crates) do
+		addPart(decor, "Crate", Vector3.new(3, 3, 3), Vector3.new(crate.X, 1.5, crate.Z), Color3.fromRGB(165, 115, 65), Enum.Material.Wood, nil, true, CFrame.Angles(0, math.rad(crate.Turn), 0))
 	end
-	local barrelSpots = { { x = -70, z = 16 }, { x = 70, z = -16 }, { x = 20, z = 46 } }
-	for i, spot in ipairs(barrelSpots) do
-		local barrel = newPart(folder, "Barrel" .. i, Vector3.new(2, 3, 2), Vector3.new(spot.x, 1.5, spot.z), Color3.fromRGB(100, 70, 40), Enum.Material.Metal)
-		barrel.Shape = Enum.PartType.Cylinder
-		barrel.CFrame = CFrame.new(spot.x, 1.5, spot.z) * CFrame.Angles(0, 0, math.rad(90))
-	end
-end
-
--- A starfield high above the market so the sunset sky feels alive: small
--- Neon balls in white, warm gold and pale cyan. Neon parts are the
--- reliable route — a Sky instance's StarCount alone barely shows at
--- ClockTime 18.0.
-local function buildStars(folder)
-	local starColors = {
-		Color3.fromRGB(255, 255, 255),
-		Color3.fromRGB(255, 220, 130),
-		Color3.fromRGB(180, 230, 255),
+	local barrels = {
+		{ X = -90, Z = -10, Color = Color3.fromRGB(140, 140, 150) },
+		{ X = 90, Z = 10, Color = Color3.fromRGB(80, 120, 200) },
+		{ X = 0, Z = 60, Color = Color3.fromRGB(200, 80, 80) },
 	}
-	for i = 1, 48 do
-		local size = 0.7 + math.random() * 0.7
-		local star = Instance.new("Part")
-		star.Name = "Star" .. i
-		star.Shape = Enum.PartType.Ball
-		star.Size = Vector3.new(size, size, size)
-		star.Position = Vector3.new(
-			math.random(-140, 140),
-			math.random(70, 130),
-			math.random(-90, 90)
+	for _, barrel in ipairs(barrels) do
+		-- A cylinder's axis runs along X, so a (3, 2, 2) cylinder already
+		-- lies on its side.
+		addPart(decor, "Barrel", Vector3.new(3, 2, 2), Vector3.new(barrel.X, 1, barrel.Z), barrel.Color, Enum.Material.Metal, Enum.PartType.Cylinder)
+	end
+	local starColors = { Color3.fromRGB(255, 255, 255), Color3.fromRGB(255, 220, 140), Color3.fromRGB(180, 240, 255) }
+	for _ = 1, 48 do
+		local size = 0.5 + math.random() * 0.5
+		local color = starColors[math.random(1, 3)]
+		addPart(
+			decor,
+			"Star",
+			Vector3.new(size, size, size),
+			Vector3.new(math.random(-140, 140), math.random(70, 130), math.random(-90, 90)),
+			color,
+			Enum.Material.Neon,
+			Enum.PartType.Ball,
+			false
 		)
-		star.Color = starColors[math.random(1, #starColors)]
-		star.Material = Enum.Material.Neon
-		star.Anchored = true
-		star.CanCollide = false
-		star.TopSurface = Enum.SurfaceType.Smooth
-		star.BottomSurface = Enum.SurfaceType.Smooth
-		star.Parent = folder
-	end
-	-- Real stars too, for when the sky darkens.
-	local lighting = game:GetService("Lighting")
-	if not lighting:FindFirstChildOfClass("Sky") then
-		local sky = Instance.new("Sky")
-		sky.StarCount = 3000
-		sky.Parent = lighting
 	end
 end
 
--- Builds the whole sunset market and returns the base records BaseService needs.
-function WorldBuilder.buildNightMarket()
+-- Build the market and hand back the lapak records.
+function WorldBuilder.build()
 	local world = Instance.new("Folder")
 	world.Name = "PasarBrainrot"
-	world.Parent = Workspace
+	world.Parent = workspace
 
-	local conveyorFolder = Instance.new("Folder")
-	conveyorFolder.Name = "Conveyor"
-	conveyorFolder.Parent = world
-	buildConveyorBelt(conveyorFolder)
-
-	local basesFolder = Instance.new("Folder")
-	basesFolder.Name = "Bases"
-	basesFolder.Parent = world
+	buildBelt(world)
 	local bases = {}
-	for i, def in ipairs(Config.BASES) do
-		bases[i] = buildPlayerBase(basesFolder, i, def)
+	for index, def in ipairs(Config.Bases) do
+		table.insert(bases, buildBase(world, index, def))
 	end
+	buildLamps(world)
+	buildStalls(world)
+	buildArch(world)
+	buildDecor(world)
 
-	local decorFolder = Instance.new("Folder")
-	decorFolder.Name = "Decor"
-	decorFolder.Parent = world
-	buildLampPosts(decorFolder)
-	buildFoodStalls(decorFolder)
-	buildWelcomeArch(decorFolder)
-	buildDecorations(decorFolder)
-	buildStars(decorFolder)
-
-	return { bases = bases, worldFolder = world }
+	return bases
 end
 
 return WorldBuilder
