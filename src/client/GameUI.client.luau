@@ -1,6 +1,6 @@
 -- GameUI.client.luau
 -- The HUD for Pasar Brainrot. Money top-centre (never top-left, where
--- Roblox's own menu buttons sit), four action buttons down the right side,
+-- Roblox's own menu buttons sit), five action buttons down the right side,
 -- a hint bar along the bottom, toasts bottom-right, and upgrade / index
 -- panels that open over the middle. On touch devices without a keyboard the
 -- right-side stack collapses into one small MENU pill, because the full
@@ -223,27 +223,8 @@ local upgradeButton = makeButton(gui, "UPGRADE", Color3.fromRGB(90, 40, 140), UD
 upgradeButton.AnchorPoint = Vector2.new(1, 0)
 local indexButton = makeButton(gui, "INDEX (9)", Color3.fromRGB(50, 55, 80), UDim2.new(0, 188, 0, 48), UDim2.new(1, -16, 0, 298))
 indexButton.AnchorPoint = Vector2.new(1, 0)
-local musicButton = makeButton(gui, "MUSIK: ON", Color3.fromRGB(40, 90, 180), UDim2.new(0, 188, 0, 48), UDim2.new(1, -16, 0, 354))
+local musicButton = makeButton(gui, "MUSIK: ON", CYAN, UDim2.new(0, 188, 0, 48), UDim2.new(1, -16, 0, 354))
 musicButton.AnchorPoint = Vector2.new(1, 0)
-
--- Music mute: fires the MusicToggle event the Music script listens to, and
--- flips this button's label. The event is found or created on demand so the
--- button works even if the Music script has not run yet.
-local musicOn = true
-local function getMusicToggle()
-	local event = ReplicatedStorage:FindFirstChild("MusicToggle")
-	if not event then
-		event = Instance.new("BindableEvent")
-		event.Name = "MusicToggle"
-		event.Parent = ReplicatedStorage
-	end
-	return event
-end
-musicButton.MouseButton1Click:Connect(function()
-	musicOn = not musicOn
-	musicButton.Text = musicOn and "MUSIK: ON" or "MUSIK: OFF"
-	getMusicToggle():Fire()
-end)
 
 if isTouch then
 	-- The same five buttons, compacted into the menu panel.
@@ -529,6 +510,25 @@ lockButton.MouseButton1Click:Connect(function()
 end)
 rebirthButton.MouseButton1Click:Connect(function()
 	RebirthRemote:FireServer()
+	closeMenu()
+end)
+local musicOn = true
+musicButton.MouseButton1Click:Connect(function()
+	-- Fire the toggle the Music script listens on; create it if that script
+	-- has not run yet. Then flip this button's own label to match.
+	local toggle = ReplicatedStorage:FindFirstChild("MusicToggle")
+	if not toggle then
+		toggle = Instance.new("BindableEvent")
+		toggle.Name = "MusicToggle"
+		toggle.Parent = ReplicatedStorage
+	end
+	toggle:Fire()
+	musicOn = not musicOn
+	if musicOn then
+		musicButton.Text = "MUSIK: ON"
+	else
+		musicButton.Text = "MUSIK: OFF"
+	end
 	closeMenu()
 end)
 
