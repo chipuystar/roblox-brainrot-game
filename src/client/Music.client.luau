@@ -1,41 +1,41 @@
--- Music.client.luau — background music for Pasar Brainrot.
--- Plays a looping track in SoundService and toggles it on the MusicToggle
--- BindableEvent. The Sound lives in SoundService, not under the character,
--- so the music keeps playing through respawns.
+-- Music.client.luau
+-- Background music for Pasar Brainrot: a looping track that starts when the
+-- client loads, with a mute toggle driven by the MUSIK button in GameUI.
+-- The Sound lives in SoundService (never under the character), so it keeps
+-- playing through respawns.
 
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local SoundService = game:GetService("SoundService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local TRACK_ID = "rbxassetid://1843404009" -- "Happy Song", APM Music
+local TRACK_ID = "rbxassetid://1843404009" -- "Happy Song" (APM Music)
 local SOUND_NAME = "PasarBrainrotMusic"
+local TOGGLE_EVENT_NAME = "MusicToggle"
 local VOLUME = 0.5
 
--- If the track is already set up (this script re-ran after a respawn), leave
--- it exactly as it is: never restart it, never duplicate it, never undo a
--- mute the player chose.
-if SoundService:FindFirstChild(SOUND_NAME) then
-	return
+-- StarterPlayerScripts re-runs this script on every respawn. If the Sound is
+-- already there, leave it alone: never restart the track, never stack a
+-- second copy on top, and never undo the player's mute.
+local music = SoundService:FindFirstChild(SOUND_NAME)
+if not music then
+	music = Instance.new("Sound")
+	music.Name = SOUND_NAME
+	music.SoundId = TRACK_ID
+	music.Looped = true
+	music.Volume = VOLUME
+	music.Parent = SoundService
+	music:Play()
 end
 
-local music = Instance.new("Sound")
-music.Name = SOUND_NAME
-music.SoundId = TRACK_ID
-music.Looped = true
-music.Volume = VOLUME
-music.Parent = SoundService
-music:Play()
-
--- The mute button fires this event; each fire flips the track between paused
--- and playing. Create the event here so it exists from load; the button
--- finds it (or creates it itself if this script has not run yet).
-local toggle = ReplicatedStorage:FindFirstChild("MusicToggle")
-if not toggle then
-	toggle = Instance.new("BindableEvent")
-	toggle.Name = "MusicToggle"
-	toggle.Parent = ReplicatedStorage
+-- One shared event for the mute button. Find it, or create it here, so the
+-- button works even if it is built before this script runs.
+local toggleEvent = ReplicatedStorage:FindFirstChild(TOGGLE_EVENT_NAME)
+if not toggleEvent then
+	toggleEvent = Instance.new("BindableEvent")
+	toggleEvent.Name = TOGGLE_EVENT_NAME
+	toggleEvent.Parent = ReplicatedStorage
 end
 
-toggle.Event:Connect(function()
+toggleEvent.Event:Connect(function()
 	if music.Playing then
 		music:Pause()
 	else

@@ -512,17 +512,20 @@ rebirthButton.MouseButton1Click:Connect(function()
 	RebirthRemote:FireServer()
 	closeMenu()
 end)
+
+-- The music toggle: fires the shared MusicToggle event and flips the label.
+-- The event is found or created here, so the button works even if the Music
+-- script has not run yet. The track starts playing on load, so the button
+-- starts in the ON state.
 local musicOn = true
 musicButton.MouseButton1Click:Connect(function()
-	-- Fire the toggle the Music script listens on; create it if that script
-	-- has not run yet. Then flip this button's own label to match.
-	local toggle = ReplicatedStorage:FindFirstChild("MusicToggle")
-	if not toggle then
-		toggle = Instance.new("BindableEvent")
-		toggle.Name = "MusicToggle"
-		toggle.Parent = ReplicatedStorage
+	local toggleEvent = ReplicatedStorage:FindFirstChild("MusicToggle")
+	if not toggleEvent then
+		toggleEvent = Instance.new("BindableEvent")
+		toggleEvent.Name = "MusicToggle"
+		toggleEvent.Parent = ReplicatedStorage
 	end
-	toggle:Fire()
+	toggleEvent:Fire()
 	musicOn = not musicOn
 	if musicOn then
 		musicButton.Text = "MUSIK: ON"
