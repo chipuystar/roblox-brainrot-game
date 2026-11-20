@@ -1,30 +1,20 @@
--- GameUI.client.luau
--- The HUD for Pasar Brainrot. Money top-centre (never top-left, where
--- Roblox's own menu buttons sit), five action buttons down the right side,
--- a hint bar along the bottom, toasts bottom-right, and upgrade / index
--- panels that open over the middle. On touch devices without a keyboard the
--- right-side stack collapses into one small MENU pill, because the full
--- stack would cover the jump button and the camera area.
---
--- The client keeps its own copy of the character, rebirth and upgrade data:
--- Config lives on the server, where the client cannot require it.
-
+-- GameUI: the whole Pasar Brainrot HUD — money panel, action buttons, hint bar,
+-- toasts, upgrade and index panels, and the title overlay. Display font is
+-- LuckiestGuy; labels use GothamBold/GothamBlack. Never Bungee: it is not a
+-- Roblox font and breaks scripts that name it.
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 
 local player = Players.LocalPlayer
+local remotes = ReplicatedStorage:WaitForChild("Remotes")
+local leaderstats = player:WaitForChild("leaderstats")
+local cashValue = leaderstats:WaitForChild("Cash")
+local incomeValue = leaderstats:WaitForChild("Income")
+local rebirthValue = leaderstats:WaitForChild("Rebirths")
+local waveTimer = remotes:WaitForChild("WaveTimer")
 
-local Remotes = ReplicatedStorage:WaitForChild("Remotes")
-local LockBaseRemote = Remotes:WaitForChild("LockBase")
-local RebirthRemote = Remotes:WaitForChild("RequestRebirth")
-local UpgradeRemote = Remotes:WaitForChild("BuyUpgrade")
-local Notify = Remotes:WaitForChild("Notify")
-local WaveTimer = Remotes:WaitForChild("WaveTimer")
-
--- Palette and fonts. Display text is LuckiestGuy; labels are GothamBold /
--- GothamBlack. Never Bungee: it is not a Roblox font and breaks scripts.
 local DARK = Color3.fromRGB(18, 10, 32)
 local GOLD = Color3.fromRGB(255, 183, 3)
 local PURPLE = Color3.fromRGB(157, 78, 221)
@@ -34,670 +24,568 @@ local GREEN = Color3.fromRGB(120, 255, 140)
 local WHITE = Color3.fromRGB(245, 240, 255)
 local RED = Color3.fromRGB(255, 90, 90)
 
-local DISPLAY_FONT = Enum.Font.LuckiestGuy
+local TITLE_FONT = Enum.Font.LuckiestGuy
 local LABEL_FONT = Enum.Font.GothamBold
 local HEAVY_FONT = Enum.Font.GothamBlack
 
--- The cast, for the index panel. Prices and rates match the server's Config.
+-- The same tuning the server runs on, copied here for the panels (the client
+-- cannot require server modules).
 local CHARACTERS = {
-	{ Name = "Bakso Berlari", Rarity = "Common", Price = 50, Rate = 5 },
-	{ Name = "Es Teh Manis Terbang", Rarity = "Common", Price = 100, Rate = 8 },
-	{ Name = "Gorengan Galak", Rarity = "Rare", Price = 400, Rate = 20 },
-	{ Name = "Kucing Oren Ngamuk", Rarity = "Rare", Price = 800, Rate = 35 },
-	{ Name = "Ayam Geprek Terbang", Rarity = "Epic", Price = 2000, Rate = 60 },
-	{ Name = "Durian Meledak", Rarity = "Epic", Price = 4000, Rate = 100 },
-	{ Name = "Kopi Tubruk Raksasa", Rarity = "Legendary", Price = 10000, Rate = 180 },
-	{ Name = "Gerobak Bakso Terbang", Rarity = "Legendary", Price = 20000, Rate = 300 },
-	{ Name = "Nasi Padang Sejagat", Rarity = "Mythic", Price = 50000, Rate = 500 },
+	{ Name = "Bakso Berlari", Rarity = "Common", Price = 50, Rate = 5, Color = Color3.fromRGB(158, 227, 125) },
+	{ Name = "Es Teh Manis Terbang", Rarity = "Common", Price = 100, Rate = 8, Color = Color3.fromRGB(158, 227, 125) },
+	{ Name = "Gorengan Galak", Rarity = "Rare", Price = 400, Rate = 20, Color = Color3.fromRGB(76, 201, 240) },
+	{ Name = "Kucing Oren Ngamuk", Rarity = "Rare", Price = 800, Rate = 35, Color = Color3.fromRGB(76, 201, 240) },
+	{ Name = "Ayam Geprek Terbang", Rarity = "Epic", Price = 2000, Rate = 60, Color = Color3.fromRGB(157, 78, 221) },
+	{ Name = "Durian Meledak", Rarity = "Epic", Price = 4000, Rate = 100, Color = Color3.fromRGB(157, 78, 221) },
+	{ Name = "Kopi Tubruk Raksasa", Rarity = "Legendary", Price = 10000, Rate = 180, Color = Color3.fromRGB(255, 183, 3) },
+	{ Name = "Gerobak Bakso Terbang", Rarity = "Legendary", Price = 20000, Rate = 300, Color = Color3.fromRGB(255, 183, 3) },
+	{ Name = "Nasi Padang Sejagat", Rarity = "Mythic", Price = 50000, Rate = 500, Color = Color3.fromRGB(255, 77, 109) },
 }
-local RARITY_COLORS = {
-	Common = Color3.fromRGB(158, 227, 125),
-	Rare = Color3.fromRGB(76, 201, 240),
-	Epic = Color3.fromRGB(157, 78, 221),
-	Legendary = Color3.fromRGB(255, 183, 3),
-	Mythic = Color3.fromRGB(255, 77, 109),
-}
-local REBIRTH_NEEDS = { 25000, 150000, 750000, 3000000 }
-local UPGRADES = {
-	speed = { Name = "Sepatu Kilat", Desc = "Lari lebih cepat", Costs = { 500, 2000, 6000 } },
-	carry = { Name = "Tangan Kedua", Desc = "Bawa 2 brainrot sekaligus", Costs = { 2500 } },
-	income = { Name = "Timbangan Emas", Desc = "+25% $/detik per level", Costs = { 1000, 4000, 12000 } },
-}
-local UPGRADE_ORDER = { "speed", "carry", "income" }
 
--- 25000 -> "25.0K", 456 -> "456".
+local REBIRTH_NEEDS = { 25000, 150000, 750000, 3000000 }
+
+local UPGRADES = {
+	{ Id = "speed", Name = "Sepatu Kilat", Desc = "Lari lebih cepat", Costs = { 500, 2000, 6000 }, Attr = "SpeedLevel" },
+	{ Id = "carry", Name = "Tangan Kedua", Desc = "Bawa 2 brainrot sekaligus", Costs = { 2500 }, Attr = "CarryCapacity" },
+	{ Id = "income", Name = "Timbangan Emas", Desc = "+25% $/detik per level", Costs = { 1000, 4000, 12000 }, Attr = "IncomeLevel" },
+}
+
 local function compact(n)
 	if n >= 1000000 then
-		return string.format("%.1fM", n / 1000000)
+		local s = string.format("%.1fJT", n / 1000000)
+		return (s:gsub("%.0JT", "JT"))
 	elseif n >= 1000 then
-		return string.format("%.1fK", n / 1000)
+		local s = string.format("%.1fK", n / 1000)
+		return (s:gsub("%.0K", "K"))
 	else
-		return tostring(n)
+		return tostring(math.floor(n))
 	end
 end
 
+local function formatMoney(n)
+	return "$" .. tostring(math.floor(n))
+end
+
+local function frame(parent, props)
+	local f = Instance.new("Frame")
+	for name, value in pairs(props) do
+		f[name] = value
+	end
+	f.Parent = parent
+	return f
+end
+
+local function label(parent, props)
+	local l = Instance.new("TextLabel")
+	l.BackgroundTransparency = 1
+	for name, value in pairs(props) do
+		l[name] = value
+	end
+	l.Parent = parent
+	return l
+end
+
+local function button(parent, props)
+	local b = Instance.new("TextButton")
+	b.AutoButtonColor = true
+	for name, value in pairs(props) do
+		b[name] = value
+	end
+	b.Parent = parent
+	return b
+end
+
+local function corner(parent, radius)
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, radius)
+	c.Parent = parent
+	return c
+end
+
 local gui = Instance.new("ScreenGui")
-gui.Name = "PasarBrainrotHUD"
+gui.Name = "PasarBrainrotUI"
 gui.IgnoreGuiInset = true
 gui.ResetOnSpawn = false
 gui.DisplayOrder = 30
 gui.Parent = player:WaitForChild("PlayerGui")
 
-local function rounded(parent, radius)
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, radius)
-	corner.Parent = parent
-	return corner
-end
+-- Money panel, top-centre (never top-left, where Roblox's menu buttons sit).
+local moneyPanel = frame(gui, {
+	Name = "MoneyPanel",
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.new(0.5, 0, 0, 12),
+	Size = UDim2.fromOffset(360, 84),
+	BackgroundColor3 = DARK,
+	BackgroundTransparency = 0.15,
+	BorderColor3 = GOLD,
+	BorderSizePixel = 2,
+})
+corner(moneyPanel, 12)
 
-local function outlined(parent, color, thickness, transparency)
-	local stroke = Instance.new("UIStroke")
-	stroke.Color = color
-	stroke.Thickness = thickness
-	stroke.Transparency = transparency or 0
-	stroke.Parent = parent
-	return stroke
-end
-
-local function makeButton(parent, text, bgColor, size, position)
-	local button = Instance.new("TextButton")
-	button.Text = text
-	button.Font = DISPLAY_FONT
-	button.TextSize = 18
-	button.TextColor3 = WHITE
-	button.BackgroundColor3 = bgColor
-	button.Size = size
-	button.Position = position
-	button.Parent = parent
-	rounded(button, 10)
-	outlined(button, Color3.fromRGB(255, 255, 255), 1, 0.75)
-	return button
-end
-
--- Money panel, top-centre, with a gold border.
-local moneyPanel = Instance.new("Frame")
-moneyPanel.Name = "MoneyPanel"
-moneyPanel.AnchorPoint = Vector2.new(0.5, 0)
-moneyPanel.Position = UDim2.new(0.5, 0, 0, 12)
-moneyPanel.Size = UDim2.new(0, 360, 0, 84)
-moneyPanel.BackgroundColor3 = DARK
-moneyPanel.BackgroundTransparency = 0.15
-moneyPanel.Parent = gui
-rounded(moneyPanel, 12)
-outlined(moneyPanel, GOLD, 2, 0)
-
-local cashLabel = Instance.new("TextLabel")
-cashLabel.Name = "Cash"
-cashLabel.Text = "$250"
-cashLabel.Font = DISPLAY_FONT
-cashLabel.TextSize = 34
-cashLabel.TextColor3 = GOLD
-cashLabel.BackgroundTransparency = 1
-cashLabel.Size = UDim2.new(1, 0, 0, 44)
-cashLabel.Position = UDim2.new(0, 0, 0, 6)
-cashLabel.Parent = moneyPanel
+local cashLabel = label(moneyPanel, {
+	Name = "CashLabel",
+	Position = UDim2.new(0, 0, 0, 4),
+	Size = UDim2.new(1, 0, 0, 44),
+	Font = TITLE_FONT,
+	TextSize = 34,
+	TextColor3 = GOLD,
+	Text = "$250",
+})
 local cashScale = Instance.new("UIScale")
 cashScale.Parent = cashLabel
 
-local subLabel = Instance.new("TextLabel")
-subLabel.Name = "Sub"
-subLabel.Text = "$0/detik  •  x1.00  •  REBIRTH 0  •  Pemula Pasar"
-subLabel.Font = LABEL_FONT
-subLabel.TextSize = 15
-subLabel.TextColor3 = WHITE
-subLabel.BackgroundTransparency = 1
-subLabel.Size = UDim2.new(1, 0, 0, 24)
-subLabel.Position = UDim2.new(0, 0, 0, 52)
-subLabel.Parent = moneyPanel
+local subLabel = label(moneyPanel, {
+	Name = "SubLabel",
+	Position = UDim2.new(0, 0, 0, 50),
+	Size = UDim2.new(1, 0, 0, 26),
+	Font = LABEL_FONT,
+	TextSize = 15,
+	TextColor3 = WHITE,
+	Text = "$0/detik • x1 • REBIRTH 0 • Pemula Pasar",
+})
 
--- Wave countdown under the money panel. Pink, turning red under 15 seconds.
-local waveLabel = Instance.new("TextLabel")
-waveLabel.Name = "Wave"
-waveLabel.Text = "GEROBAK TSUNAMI 1:15"
-waveLabel.Font = HEAVY_FONT
-waveLabel.TextSize = 16
-waveLabel.TextColor3 = PINK
-waveLabel.BackgroundTransparency = 1
-waveLabel.AnchorPoint = Vector2.new(0.5, 0)
-waveLabel.Position = UDim2.new(0.5, 0, 0, 104)
-waveLabel.Size = UDim2.new(0, 360, 0, 26)
-waveLabel.Parent = gui
+local waveLabel = label(gui, {
+	Name = "WaveLabel",
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = UDim2.new(0.5, 0, 0, 104),
+	Size = UDim2.fromOffset(360, 26),
+	Font = TITLE_FONT,
+	TextSize = 18,
+	TextColor3 = PINK,
+	Text = "GEROBAK TSUNAMI 1:15",
+})
 
--- Hint bar along the bottom.
-local hintBar = Instance.new("Frame")
-hintBar.Name = "HintBar"
-hintBar.AnchorPoint = Vector2.new(0.5, 1)
-hintBar.Position = UDim2.new(0.5, 0, 1, -16)
-hintBar.Size = UDim2.new(0, 560, 0, 40)
-hintBar.BackgroundColor3 = DARK
-hintBar.BackgroundTransparency = 0.15
-hintBar.Parent = gui
-rounded(hintBar, 10)
-outlined(hintBar, PURPLE, 1, 0.3)
-local hintLabel = Instance.new("TextLabel")
-hintLabel.Text = "Dekati brainrot di konveyor lalu tekan E untuk membeli"
-hintLabel.Font = LABEL_FONT
-hintLabel.TextSize = 15
-hintLabel.TextColor3 = WHITE
-hintLabel.BackgroundTransparency = 1
-hintLabel.Size = UDim2.new(1, -16, 1, 0)
-hintLabel.Position = UDim2.new(0, 8, 0, 0)
-hintLabel.Parent = hintBar
+-- Upgrade panel: one row per upgrade, refreshed from player attributes.
+local upgradePanel = frame(gui, {
+	Name = "UpgradePanel",
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromOffset(460, 330),
+	BackgroundColor3 = DARK,
+	BorderColor3 = PURPLE,
+	BorderSizePixel = 2,
+	Visible = false,
+})
+corner(upgradePanel, 14)
+label(upgradePanel, { Text = "UPGRADE", Font = TITLE_FONT, TextSize = 28, TextColor3 = GOLD, Position = UDim2.new(0, 0, 0, 10), Size = UDim2.new(1, 0, 0, 36) })
+local upgradeClose = button(upgradePanel, { Text = "X", Font = HEAVY_FONT, TextSize = 20, TextColor3 = WHITE, BackgroundColor3 = Color3.fromRGB(120, 30, 30), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 10), Size = UDim2.fromOffset(36, 36) })
+corner(upgradeClose, 8)
 
--- The four action buttons. On PC they stack down the right side; on touch
--- devices they live inside the compact menu panel instead.
-local isTouch = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+local refreshUpgradePanel -- assigned below; the buy buttons call it after a purchase
+local upgradeRows = {}
+for i, def in ipairs(UPGRADES) do
+	local row = frame(upgradePanel, {
+		Position = UDim2.new(0, 16, 0, 56 + (i - 1) * 88),
+		Size = UDim2.new(1, -32, 0, 76),
+		BackgroundColor3 = Color3.fromRGB(35, 22, 55),
+		BorderSizePixel = 0,
+	})
+	corner(row, 10)
+	label(row, { Text = def.Name, Font = TITLE_FONT, TextSize = 18, TextColor3 = WHITE, TextXAlignment = Enum.TextXAlignment.Left, Position = UDim2.new(0, 12, 0, 6), Size = UDim2.new(0.6, 0, 0, 26) })
+	label(row, { Text = def.Desc, Font = LABEL_FONT, TextSize = 13, TextColor3 = Color3.fromRGB(200, 190, 220), TextXAlignment = Enum.TextXAlignment.Left, Position = UDim2.new(0, 12, 0, 32), Size = UDim2.new(0.6, 0, 0, 22) })
+	local levelLabel = label(row, { Text = "Lv 0/" .. #def.Costs, Font = LABEL_FONT, TextSize = 14, TextColor3 = CYAN, TextXAlignment = Enum.TextXAlignment.Left, Position = UDim2.new(0, 12, 0, 52), Size = UDim2.new(0.6, 0, 0, 20) })
+	local buyButton = button(row, { Text = "BELI $" .. def.Costs[1], Font = HEAVY_FONT, TextSize = 16, TextColor3 = Color3.fromRGB(10, 40, 10), BackgroundColor3 = GREEN, AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0), Size = UDim2.fromOffset(120, 40) })
+	corner(buyButton, 8)
+	buyButton.MouseButton1Click:Connect(function()
+		remotes.BuyUpgrade:FireServer(def.Id)
+		task.delay(0.3, refreshUpgradePanel)
+	end)
+	upgradeRows[def.Id] = { levelLabel = levelLabel, buyButton = buyButton, def = def }
+end
 
-local menuPanel = Instance.new("Frame")
-menuPanel.Name = "MenuPanel"
-menuPanel.AnchorPoint = Vector2.new(1, 0)
-menuPanel.Position = UDim2.new(1, -16, 0, 174)
-menuPanel.Size = UDim2.new(0, 204, 0, 216)
-menuPanel.BackgroundColor3 = DARK
-menuPanel.BackgroundTransparency = 0.15
-menuPanel.Visible = false
-menuPanel.Parent = gui
-rounded(menuPanel, 12)
-outlined(menuPanel, PURPLE, 1, 0.3)
-
-local menuButton = Instance.new("TextButton")
-menuButton.Name = "MenuButton"
-menuButton.Text = "MENU"
-menuButton.Font = DISPLAY_FONT
-menuButton.TextSize = 16
-menuButton.TextColor3 = WHITE
-menuButton.BackgroundColor3 = Color3.fromRGB(50, 55, 80)
-menuButton.AnchorPoint = Vector2.new(1, 0)
-menuButton.Position = UDim2.new(1, -16, 0, 130)
-menuButton.Size = UDim2.new(0, 90, 0, 36)
-menuButton.Visible = isTouch
-menuButton.Parent = gui
-rounded(menuButton, 18)
-outlined(menuButton, Color3.fromRGB(255, 255, 255), 1, 0.75)
-
-local lockButton = makeButton(gui, "KUNCI LAPAK", Color3.fromRGB(20, 90, 100), UDim2.new(0, 188, 0, 48), UDim2.new(1, -16, 0, 130))
-lockButton.AnchorPoint = Vector2.new(1, 0)
-local rebirthButton = makeButton(gui, "REBIRTH 0/25.0K", Color3.fromRGB(140, 100, 10), UDim2.new(0, 188, 0, 48), UDim2.new(1, -16, 0, 186))
-rebirthButton.AnchorPoint = Vector2.new(1, 0)
-local upgradeButton = makeButton(gui, "UPGRADE", Color3.fromRGB(90, 40, 140), UDim2.new(0, 188, 0, 48), UDim2.new(1, -16, 0, 242))
-upgradeButton.AnchorPoint = Vector2.new(1, 0)
-local indexButton = makeButton(gui, "INDEX (9)", Color3.fromRGB(50, 55, 80), UDim2.new(0, 188, 0, 48), UDim2.new(1, -16, 0, 298))
-indexButton.AnchorPoint = Vector2.new(1, 0)
-local musicButton = makeButton(gui, "MUSIK: ON", CYAN, UDim2.new(0, 188, 0, 48), UDim2.new(1, -16, 0, 354))
-musicButton.AnchorPoint = Vector2.new(1, 0)
-
-if isTouch then
-	-- The same five buttons, compacted into the menu panel.
-	local compact = { lockButton, rebirthButton, upgradeButton, indexButton, musicButton }
-	for i, button in ipairs(compact) do
-		button.Parent = menuPanel
-		button.AnchorPoint = Vector2.new(0, 0)
-		button.Size = UDim2.new(0, 188, 0, 36)
-		button.Position = UDim2.new(0, 8, 0, 8 + (i - 1) * 40)
+refreshUpgradePanel = function()
+	for _, row in pairs(upgradeRows) do
+		local def = row.def
+		local level = 0
+		if def.Id == "carry" then
+			level = (player:GetAttribute("CarryCapacity") or 1) - 1
+		else
+			level = player:GetAttribute(def.Attr) or 0
+		end
+		row.levelLabel.Text = "Lv " .. level .. "/" .. #def.Costs
+		if level >= #def.Costs then
+			row.buyButton.Text = "MAX"
+			row.buyButton.BackgroundColor3 = Color3.fromRGB(90, 90, 100)
+		else
+			row.buyButton.Text = "BELI $" .. def.Costs[level + 1]
+			row.buyButton.BackgroundColor3 = GREEN
+		end
 	end
 end
 
-local function closeMenu()
-	menuPanel.Visible = false
+-- Index panel: a 3x3 grid of character cards.
+local indexPanel = frame(gui, {
+	Name = "IndexPanel",
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromOffset(560, 380),
+	BackgroundColor3 = DARK,
+	BorderColor3 = CYAN,
+	BorderSizePixel = 2,
+	Visible = false,
+})
+corner(indexPanel, 14)
+label(indexPanel, { Text = "INDEX BRAINROT", Font = TITLE_FONT, TextSize = 28, TextColor3 = GOLD, Position = UDim2.new(0, 0, 0, 10), Size = UDim2.new(1, 0, 0, 36) })
+local indexClose = button(indexPanel, { Text = "X", Font = HEAVY_FONT, TextSize = 20, TextColor3 = WHITE, BackgroundColor3 = Color3.fromRGB(120, 30, 30), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 10), Size = UDim2.fromOffset(36, 36) })
+corner(indexClose, 8)
+
+local grid = frame(indexPanel, { BackgroundTransparency = 1, Position = UDim2.new(0, 12, 0, 56), Size = UDim2.new(1, -24, 1, -68), BorderSizePixel = 0 })
+local gridLayout = Instance.new("UIGridLayout")
+gridLayout.CellSize = UDim2.fromOffset(170, 100)
+gridLayout.CellPadding = UDim2.fromOffset(8, 8)
+gridLayout.Parent = grid
+for _, char in ipairs(CHARACTERS) do
+	local card = frame(grid, { BackgroundColor3 = Color3.fromRGB(35, 22, 55), BorderSizePixel = 0 })
+	corner(card, 10)
+	label(card, { Text = char.Name, Font = TITLE_FONT, TextSize = 14, TextColor3 = char.Color, Position = UDim2.new(0, 4, 0, 6), Size = UDim2.new(1, -8, 0, 40), TextWrapped = true })
+	label(card, { Text = string.upper(char.Rarity) .. " • $" .. char.Rate .. "/detik", Font = LABEL_FONT, TextSize = 12, TextColor3 = WHITE, Position = UDim2.new(0, 4, 0, 48), Size = UDim2.new(1, -8, 0, 20) })
+	label(card, { Text = "$" .. char.Price, Font = HEAVY_FONT, TextSize = 15, TextColor3 = GREEN, Position = UDim2.new(0, 4, 0, 70), Size = UDim2.new(1, -8, 0, 22) })
 end
 
-menuButton.MouseButton1Click:Connect(function()
+local function closePanels()
+	upgradePanel.Visible = false
+	indexPanel.Visible = false
+end
+
+local function toggleUpgrade()
+	local show = not upgradePanel.Visible
+	closePanels()
+	upgradePanel.Visible = show
+	if show then
+		refreshUpgradePanel()
+	end
+end
+
+local function toggleIndex()
+	local show = not indexPanel.Visible
+	closePanels()
+	indexPanel.Visible = show
+end
+
+upgradeClose.MouseButton1Click:Connect(closePanels)
+indexClose.MouseButton1Click:Connect(closePanels)
+
+-- Music state: the Music script owns the Sound; this button only fires the toggle.
+local musicOn = true
+local musicButtons = {}
+
+local function getMusicToggle()
+	local toggle = ReplicatedStorage:FindFirstChild("MusicToggle")
+	if not toggle then
+		toggle = Instance.new("BindableEvent")
+		toggle.Name = "MusicToggle"
+		toggle.Parent = ReplicatedStorage
+	end
+	return toggle
+end
+
+-- The five actions, shared by the PC column and the touch menu.
+local buttonSpecs = {
+	{ key = "lock", text = "KUNCI LAPAK", color = Color3.fromRGB(0, 120, 110), action = function() remotes.LockBase:FireServer() end },
+	{ key = "rebirth", text = "REBIRTH", color = Color3.fromRGB(150, 110, 10), action = function() remotes.RequestRebirth:FireServer() end },
+	{ key = "upgrade", text = "UPGRADE", color = Color3.fromRGB(90, 50, 140), action = toggleUpgrade },
+	{ key = "index", text = "INDEX (9)", color = Color3.fromRGB(60, 60, 80), action = toggleIndex },
+	{ key = "music", text = "MUSIK: ON", color = Color3.fromRGB(40, 110, 70), action = function()
+		musicOn = not musicOn
+		getMusicToggle():Fire()
+		for _, b in ipairs(musicButtons) do
+			b.Text = musicOn and "MUSIK: ON" or "MUSIK: OFF"
+		end
+	end },
+}
+
+local function actionButton(parent, text, color, position, size)
+	local b = button(parent, {
+		Text = text,
+		Font = TITLE_FONT,
+		TextSize = 17,
+		TextColor3 = WHITE,
+		BackgroundColor3 = color,
+		Position = position,
+		Size = size,
+		BorderSizePixel = 0,
+	})
+	corner(b, 10)
+	return b
+end
+
+-- Touch devices without a keyboard get one small MENU pill instead of the
+-- four-button stack, which would cover the jump button and camera area.
+local isTouch = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
+local pcColumn = frame(gui, {
+	Name = "ActionColumn",
+	AnchorPoint = Vector2.new(1, 0),
+	Position = UDim2.new(1, -12, 0, 130),
+	Size = UDim2.fromOffset(188, 272),
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	Visible = not isTouch,
+})
+
+local pcButtons = {}
+for i, spec in ipairs(buttonSpecs) do
+	local b = actionButton(pcColumn, spec.text, spec.color, UDim2.new(0, 0, 0, (i - 1) * 56), UDim2.new(1, 0, 0, 48))
+	b.MouseButton1Click:Connect(spec.action)
+	pcButtons[spec.key] = b
+	if spec.key == "music" then
+		table.insert(musicButtons, b)
+	end
+end
+
+local menuPanel
+local function closeMenu()
+	if menuPanel then
+		menuPanel.Visible = false
+	end
+end
+
+local menuPill = button(gui, {
+	Name = "MenuPill",
+	Text = "MENU",
+	Font = TITLE_FONT,
+	TextSize = 16,
+	TextColor3 = WHITE,
+	BackgroundColor3 = Color3.fromRGB(60, 60, 80),
+	AnchorPoint = Vector2.new(1, 0),
+	Position = UDim2.new(1, -12, 0, 130),
+	Size = UDim2.fromOffset(90, 36),
+	BorderSizePixel = 0,
+	Visible = isTouch,
+})
+corner(menuPill, 18)
+
+menuPanel = frame(gui, {
+	Name = "MenuPanel",
+	AnchorPoint = Vector2.new(1, 0),
+	Position = UDim2.new(1, -12, 0, 174),
+	Size = UDim2.fromOffset(188, 216),
+	BackgroundColor3 = DARK,
+	BackgroundTransparency = 0.1,
+	BorderColor3 = PURPLE,
+	BorderSizePixel = 2,
+	Visible = false,
+})
+corner(menuPanel, 12)
+
+local touchButtons = {}
+for i, spec in ipairs(buttonSpecs) do
+	local b = actionButton(menuPanel, spec.text, spec.color, UDim2.new(0, 10, 0, 10 + (i - 1) * 40), UDim2.new(1, -20, 0, 36))
+	b.MouseButton1Click:Connect(function()
+		spec.action()
+		closeMenu()
+	end)
+	touchButtons[spec.key] = b
+	if spec.key == "music" then
+		table.insert(musicButtons, b)
+	end
+end
+
+menuPill.MouseButton1Click:Connect(function()
 	menuPanel.Visible = not menuPanel.Visible
 end)
 
--- Toasts, bottom-right, stacked newest at the bottom.
-local toasts = {}
-local TOAST_COLORS = { good = GREEN, buy = GREEN, bad = RED, place = GOLD, rebirth = GOLD, steal = PINK, info = WHITE }
+-- Carried / hint bar, bottom-centre.
+local hintBar = frame(gui, {
+	Name = "HintBar",
+	AnchorPoint = Vector2.new(0.5, 1),
+	Position = UDim2.new(0.5, 0, 1, -12),
+	Size = UDim2.fromOffset(560, 40),
+	BackgroundColor3 = DARK,
+	BackgroundTransparency = 0.15,
+	BorderSizePixel = 0,
+})
+corner(hintBar, 10)
+local hintLabel = label(hintBar, {
+	Text = "Dekati brainrot di konveyor lalu tekan E untuk membeli",
+	Font = LABEL_FONT,
+	TextSize = 15,
+	TextColor3 = WHITE,
+	Size = UDim2.new(1, -16, 1, 0),
+	Position = UDim2.new(0, 8, 0, 0),
+})
 
-local function layoutToasts()
-	for i, toast in ipairs(toasts) do
-		toast.Position = UDim2.new(1, -356, 1, -16 - (i - 1) * 52 - 44)
-	end
-end
+-- Toasts, bottom-right: stacked cards that fade in, show for 3.5 seconds, fade out.
+local toastHolder = frame(gui, {
+	Name = "ToastHolder",
+	AnchorPoint = Vector2.new(1, 1),
+	Position = UDim2.new(1, -12, 1, -60),
+	Size = UDim2.fromOffset(340, 260),
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+})
+local toastLayout = Instance.new("UIListLayout")
+toastLayout.VerticalAlignment = Enum.VerticalAlignment.Bottom
+toastLayout.Padding = UDim.new(0, 6)
+toastLayout.Parent = toastHolder
+
+local TOAST_COLORS = {
+	good = GREEN,
+	buy = GREEN,
+	bad = RED,
+	place = GOLD,
+	rebirth = GOLD,
+	steal = PINK,
+	info = WHITE,
+}
 
 local function showToast(text, kind)
-	local toast = Instance.new("Frame")
-	toast.BackgroundColor3 = DARK
-	toast.BackgroundTransparency = 0.1
-	toast.Size = UDim2.new(0, 340, 0, 44)
-	toast.Parent = gui
-	rounded(toast, 10)
-	outlined(toast, TOAST_COLORS[kind] or WHITE, 2, 0)
-	local label = Instance.new("TextLabel")
-	label.Text = text
-	label.Font = LABEL_FONT
-	label.TextSize = 14
-	label.TextColor3 = WHITE
-	label.BackgroundTransparency = 1
-	label.TextWrapped = true
-	label.Size = UDim2.new(1, -20, 1, 0)
-	label.Position = UDim2.new(0, 10, 0, 0)
-	label.Parent = toast
-	table.insert(toasts, 1, toast)
-	layoutToasts()
+	local color = TOAST_COLORS[kind] or WHITE
+	local toast = frame(toastHolder, {
+		Size = UDim2.new(1, 0, 0, 44),
+		BackgroundColor3 = DARK,
+		BackgroundTransparency = 0.1,
+		BorderColor3 = color,
+		BorderSizePixel = 2,
+	})
+	corner(toast, 8)
+	local toastLabel = label(toast, {
+		Text = text,
+		Font = LABEL_FONT,
+		TextSize = 14,
+		TextColor3 = color,
+		Size = UDim2.new(1, -16, 1, 0),
+		Position = UDim2.new(0, 8, 0, 0),
+		TextWrapped = true,
+	})
 	toast.BackgroundTransparency = 1
-	label.TextTransparency = 1
+	toastLabel.TextTransparency = 1
 	TweenService:Create(toast, TweenInfo.new(0.25), { BackgroundTransparency = 0.1 }):Play()
-	TweenService:Create(label, TweenInfo.new(0.25), { TextTransparency = 0 }):Play()
+	TweenService:Create(toastLabel, TweenInfo.new(0.25), { TextTransparency = 0 }):Play()
 	task.delay(3.5, function()
-		local fade = TweenService:Create(toast, TweenInfo.new(0.4), { BackgroundTransparency = 1 })
-		TweenService:Create(label, TweenInfo.new(0.4), { TextTransparency = 1 }):Play()
+		TweenService:Create(toast, TweenInfo.new(0.4), { BackgroundTransparency = 1 }):Play()
+		local fade = TweenService:Create(toastLabel, TweenInfo.new(0.4), { TextTransparency = 1 })
 		fade:Play()
-		fade.Completed:Connect(function()
-			for i, other in ipairs(toasts) do
-				if other == toast then
-					table.remove(toasts, i)
-					break
-				end
-			end
-			toast:Destroy()
-			layoutToasts()
-		end)
+		fade.Completed:Wait()
+		toast:Destroy()
 	end)
 end
 
-Notify.OnClientEvent:Connect(function(text, kind)
-	showToast(text, kind or "info")
-end)
-
--- Upgrade panel, centred, hidden until opened.
-local upgradePanel = Instance.new("Frame")
-upgradePanel.Name = "UpgradePanel"
-upgradePanel.AnchorPoint = Vector2.new(0.5, 0.5)
-upgradePanel.Position = UDim2.new(0.5, 0, 0.5, 0)
-upgradePanel.Size = UDim2.new(0, 460, 0, 330)
-upgradePanel.BackgroundColor3 = DARK
-upgradePanel.BackgroundTransparency = 0.05
-upgradePanel.Visible = false
-upgradePanel.Parent = gui
-rounded(upgradePanel, 14)
-outlined(upgradePanel, GOLD, 2, 0)
-
-local upgradeTitle = Instance.new("TextLabel")
-upgradeTitle.Text = "UPGRADE"
-upgradeTitle.Font = DISPLAY_FONT
-upgradeTitle.TextSize = 26
-upgradeTitle.TextColor3 = GOLD
-upgradeTitle.BackgroundTransparency = 1
-upgradeTitle.Size = UDim2.new(1, 0, 0, 44)
-upgradeTitle.Position = UDim2.new(0, 0, 0, 8)
-upgradeTitle.Parent = upgradePanel
-
-local upgradeClose = makeButton(upgradePanel, "X", Color3.fromRGB(120, 30, 30), UDim2.new(0, 36, 0, 36), UDim2.new(1, -44, 0, 8))
-upgradeClose.TextSize = 20
-
-local upgradeRows = {}
-for i, id in ipairs(UPGRADE_ORDER) do
-	local def = UPGRADES[id]
-	local row = Instance.new("Frame")
-	row.BackgroundColor3 = Color3.fromRGB(35, 22, 55)
-	row.Size = UDim2.new(0, 420, 0, 64)
-	row.Position = UDim2.new(0, 20, 0, 60 + (i - 1) * 76)
-	row.Parent = upgradePanel
-	rounded(row, 10)
-	local name = Instance.new("TextLabel")
-	name.Text = def.Name
-	name.Font = DISPLAY_FONT
-	name.TextSize = 18
-	name.TextColor3 = WHITE
-	name.BackgroundTransparency = 1
-	name.TextXAlignment = Enum.TextXAlignment.Left
-	name.Size = UDim2.new(0, 220, 0, 26)
-	name.Position = UDim2.new(0, 12, 0, 6)
-	name.Parent = row
-	local desc = Instance.new("TextLabel")
-	desc.Text = def.Desc
-	desc.Font = LABEL_FONT
-	desc.TextSize = 13
-	desc.TextColor3 = Color3.fromRGB(200, 190, 220)
-	desc.BackgroundTransparency = 1
-	desc.TextXAlignment = Enum.TextXAlignment.Left
-	desc.Size = UDim2.new(0, 220, 0, 22)
-	desc.Position = UDim2.new(0, 12, 0, 32)
-	desc.Parent = row
-	local level = Instance.new("TextLabel")
-	level.Text = "Lv 0/3"
-	level.Font = HEAVY_FONT
-	level.TextSize = 14
-	level.TextColor3 = CYAN
-	level.BackgroundTransparency = 1
-	level.Size = UDim2.new(0, 70, 0, 24)
-	level.Position = UDim2.new(0, 240, 0, 20)
-	level.Parent = row
-	local buy = makeButton(row, "$500", Color3.fromRGB(30, 120, 50), UDim2.new(0, 90, 0, 36), UDim2.new(0, 318, 0, 14))
-	buy.TextSize = 16
-	buy.MouseButton1Click:Connect(function()
-		UpgradeRemote:FireServer(id)
-	end)
-	upgradeRows[id] = { Level = level, Buy = buy }
-end
-
-local function upgradeLevel(id)
-	if id == "speed" then
-		return player:GetAttribute("SpeedLevel") or 0
-	elseif id == "income" then
-		return player:GetAttribute("IncomeLevel") or 0
-	elseif id == "carry" then
-		return (player:GetAttribute("CarryCapacity") or 1) - 1
-	end
-	return 0
-end
-
-local function refreshUpgradePanel()
-	for id, row in pairs(upgradeRows) do
-		local def = UPGRADES[id]
-		local level = upgradeLevel(id)
-		row.Level.Text = "Lv " .. level .. "/" .. #def.Costs
-		local nextCost = def.Costs[level + 1]
-		if nextCost then
-			row.Buy.Text = "$" .. nextCost
-			row.Buy.BackgroundColor3 = Color3.fromRGB(30, 120, 50)
-		else
-			row.Buy.Text = "MAX"
-			row.Buy.BackgroundColor3 = Color3.fromRGB(70, 70, 80)
-		end
-	end
-end
-
--- Index panel, centred, hidden until opened: a 3x3 grid of character cards.
-local indexPanel = Instance.new("Frame")
-indexPanel.Name = "IndexPanel"
-indexPanel.AnchorPoint = Vector2.new(0.5, 0.5)
-indexPanel.Position = UDim2.new(0.5, 0, 0.5, 0)
-indexPanel.Size = UDim2.new(0, 560, 0, 380)
-indexPanel.BackgroundColor3 = DARK
-indexPanel.BackgroundTransparency = 0.05
-indexPanel.Visible = false
-indexPanel.Parent = gui
-rounded(indexPanel, 14)
-outlined(indexPanel, CYAN, 2, 0)
-
-local indexTitle = Instance.new("TextLabel")
-indexTitle.Text = "INDEX BRAINROT"
-indexTitle.Font = DISPLAY_FONT
-indexTitle.TextSize = 26
-indexTitle.TextColor3 = CYAN
-indexTitle.BackgroundTransparency = 1
-indexTitle.Size = UDim2.new(1, 0, 0, 44)
-indexTitle.Position = UDim2.new(0, 0, 0, 8)
-indexTitle.Parent = indexPanel
-
-local indexClose = makeButton(indexPanel, "X", Color3.fromRGB(120, 30, 30), UDim2.new(0, 36, 0, 36), UDim2.new(1, -44, 0, 8))
-indexClose.TextSize = 20
-
-local grid = Instance.new("Frame")
-grid.BackgroundTransparency = 1
-grid.Size = UDim2.new(0, 520, 0, 310)
-grid.Position = UDim2.new(0, 20, 0, 58)
-grid.Parent = indexPanel
-local gridLayout = Instance.new("UIGridLayout")
-gridLayout.CellSize = UDim2.new(0, 168, 0, 96)
-gridLayout.CellPadding = UDim2.new(0, 8, 0, 8)
-gridLayout.Parent = grid
-
-for _, character in ipairs(CHARACTERS) do
-	local card = Instance.new("Frame")
-	card.BackgroundColor3 = Color3.fromRGB(35, 22, 55)
-	card.Parent = grid
-	rounded(card, 10)
-	local name = Instance.new("TextLabel")
-	name.Text = character.Name
-	name.Font = DISPLAY_FONT
-	name.TextSize = 14
-	name.TextColor3 = RARITY_COLORS[character.Rarity] or WHITE
-	name.BackgroundTransparency = 1
-	name.TextWrapped = true
-	name.Size = UDim2.new(1, -12, 0, 40)
-	name.Position = UDim2.new(0, 6, 0, 6)
-	name.Parent = card
-	local info = Instance.new("TextLabel")
-	info.Text = string.upper(character.Rarity) .. "  •  $" .. character.Rate .. "/detik"
-	info.Font = LABEL_FONT
-	info.TextSize = 12
-	info.TextColor3 = WHITE
-	info.BackgroundTransparency = 1
-	info.Size = UDim2.new(1, -12, 0, 20)
-	info.Position = UDim2.new(0, 6, 0, 48)
-	info.Parent = card
-	local price = Instance.new("TextLabel")
-	price.Text = "$" .. character.Price
-	price.Font = HEAVY_FONT
-	price.TextSize = 15
-	price.TextColor3 = GREEN
-	price.BackgroundTransparency = 1
-	price.Size = UDim2.new(1, -12, 0, 22)
-	price.Position = UDim2.new(0, 6, 0, 68)
-	price.Parent = card
-end
-
--- The panels toggle each other: opening one closes the other.
-local function openUpgrade()
-	upgradePanel.Visible = true
-	indexPanel.Visible = false
-	refreshUpgradePanel()
-end
-
-local function openIndex()
-	indexPanel.Visible = true
-	upgradePanel.Visible = false
-end
-
-upgradeButton.MouseButton1Click:Connect(function()
-	if upgradePanel.Visible then
-		upgradePanel.Visible = false
-	else
-		openUpgrade()
-	end
-	closeMenu()
-end)
-indexButton.MouseButton1Click:Connect(function()
-	if indexPanel.Visible then
-		indexPanel.Visible = false
-	else
-		openIndex()
-	end
-	closeMenu()
-end)
-upgradeClose.MouseButton1Click:Connect(function()
-	upgradePanel.Visible = false
-end)
-indexClose.MouseButton1Click:Connect(function()
-	indexPanel.Visible = false
-end)
-lockButton.MouseButton1Click:Connect(function()
-	LockBaseRemote:FireServer()
-	closeMenu()
-end)
-rebirthButton.MouseButton1Click:Connect(function()
-	RebirthRemote:FireServer()
-	closeMenu()
-end)
-
--- The music toggle: fires the shared MusicToggle event and flips the label.
--- The event is found or created here, so the button works even if the Music
--- script has not run yet. The track starts playing on load, so the button
--- starts in the ON state.
-local musicOn = true
-musicButton.MouseButton1Click:Connect(function()
-	local toggleEvent = ReplicatedStorage:FindFirstChild("MusicToggle")
-	if not toggleEvent then
-		toggleEvent = Instance.new("BindableEvent")
-		toggleEvent.Name = "MusicToggle"
-		toggleEvent.Parent = ReplicatedStorage
-	end
-	toggleEvent:Fire()
-	musicOn = not musicOn
-	if musicOn then
-		musicButton.Text = "MUSIK: ON"
-	else
-		musicButton.Text = "MUSIK: OFF"
-	end
-	closeMenu()
-end)
-
--- Live updates from leaderstats, attributes and the wave timer.
-local leaderstats = player:WaitForChild("leaderstats")
-local cashValue = leaderstats:WaitForChild("Cash")
-local incomeValue = leaderstats:WaitForChild("Income")
-local rebirthValue = leaderstats:WaitForChild("Rebirths")
-local lastCash = cashValue.Value
-
-local function refreshMoney()
-	local cash = cashValue.Value
-	cashLabel.Text = "$" .. cash
-	local multiplier = player:GetAttribute("Multiplier") or 1
-	local title = player:GetAttribute("RebirthTitle") or "Pemula Pasar"
-	subLabel.Text = "$" .. incomeValue.Value .. "/detik  •  x" .. string.format("%.2f", multiplier) .. "  •  REBIRTH " .. rebirthValue.Value .. "  •  " .. title
-	-- A quick scale pop on every income tick.
-	if cash > lastCash then
-		TweenService:Create(cashScale, TweenInfo.new(0.12), { Scale = 1.15 }):Play()
-		task.delay(0.12, function()
-			TweenService:Create(cashScale, TweenInfo.new(0.12), { Scale = 1 }):Play()
-		end)
-	end
-	lastCash = cash
-end
-
-local function refreshRebirthButton()
-	local earned = player:GetAttribute("TotalEarned") or 0
-	local nextNeed = REBIRTH_NEEDS[rebirthValue.Value + 1]
-	if nextNeed then
-		rebirthButton.Text = "REBIRTH " .. compact(earned) .. "/" .. compact(nextNeed)
-	else
-		rebirthButton.Text = "REBIRTH MAX"
-	end
-end
-
-local function refreshHint()
-	local names = player:GetAttribute("CarriedNames") or ""
-	if names == "" then
-		hintLabel.Text = "Dekati brainrot di konveyor lalu tekan E untuk membeli"
-		hintLabel.TextColor3 = WHITE
-	else
-		hintLabel.Text = "MEMBAWA: " .. names .. " — bawa ke lapakmu untuk menaruh!"
-		hintLabel.TextColor3 = GOLD
-	end
-end
-
-local function refreshWave()
-	local secs = WaveTimer.Value
-	local mins = math.floor(secs / 60)
-	local rest = secs % 60
-	waveLabel.Text = "GEROBAK TSUNAMI " .. mins .. ":" .. string.format("%02d", rest)
-	if secs < 15 then
-		waveLabel.TextColor3 = RED
-	else
-		waveLabel.TextColor3 = PINK
-	end
-end
-
-cashValue.Changed:Connect(refreshMoney)
-incomeValue.Changed:Connect(refreshMoney)
-rebirthValue.Changed:Connect(function()
-	refreshMoney()
-	refreshRebirthButton()
-end)
-player:GetAttributeChangedSignal("TotalEarned"):Connect(function()
-	refreshMoney()
-	refreshRebirthButton()
-end)
-player:GetAttributeChangedSignal("Multiplier"):Connect(refreshMoney)
-player:GetAttributeChangedSignal("RebirthTitle"):Connect(refreshMoney)
-player:GetAttributeChangedSignal("CarriedNames"):Connect(refreshHint)
-player:GetAttributeChangedSignal("SpeedLevel"):Connect(refreshUpgradePanel)
-player:GetAttributeChangedSignal("IncomeLevel"):Connect(refreshUpgradePanel)
-player:GetAttributeChangedSignal("CarryCapacity"):Connect(refreshUpgradePanel)
-WaveTimer:GetPropertyChangedSignal("Value"):Connect(refreshWave)
-
--- The lock button counts down while the lapak is locked.
-task.spawn(function()
-	while true do
-		task.wait(0.5)
-		local lockedUntil = player:GetAttribute("BaseLockedUntil") or 0
-		local left = lockedUntil - os.time()
-		if left > 0 then
-			lockButton.Text = "TERKUNCI " .. left .. " dtk"
-		else
-			lockButton.Text = "KUNCI LAPAK"
-		end
-	end
-end)
-
-refreshMoney()
-refreshRebirthButton()
-refreshHint()
-refreshWave()
-
--- Title overlay: full-screen, fades out on click or on its own after 8 seconds.
-local overlay = Instance.new("Frame")
-overlay.Name = "TitleOverlay"
-overlay.Size = UDim2.new(1, 0, 1, 0)
-overlay.BackgroundColor3 = Color3.fromRGB(12, 6, 24)
-overlay.BackgroundTransparency = 0.1
-overlay.ZIndex = 10
-overlay.Parent = gui
-
-local overlayClick = Instance.new("TextButton")
-overlayClick.Text = ""
-overlayClick.BackgroundTransparency = 1
-overlayClick.Size = UDim2.new(1, 0, 1, 0)
-overlayClick.ZIndex = 11
-overlayClick.Parent = overlay
-
-local overlayTitle = Instance.new("TextLabel")
-overlayTitle.Text = "PASAR BRAINROT"
-overlayTitle.Font = DISPLAY_FONT
-overlayTitle.TextSize = 64
-overlayTitle.TextColor3 = GOLD
-overlayTitle.BackgroundTransparency = 1
-overlayTitle.Size = UDim2.new(1, 0, 0, 80)
-overlayTitle.Position = UDim2.new(0, 0, 0.28, 0)
-overlayTitle.ZIndex = 12
-overlayTitle.Parent = overlay
-
-local overlaySub = Instance.new("TextLabel")
-overlaySub.Text = "Beli brainrot  •  Bawa pulang  •  Jadi kaya!"
-overlaySub.Font = LABEL_FONT
-overlaySub.TextSize = 20
-overlaySub.TextColor3 = WHITE
-overlaySub.BackgroundTransparency = 1
-overlaySub.Size = UDim2.new(1, 0, 0, 30)
-overlaySub.Position = UDim2.new(0, 0, 0.28, 84)
-overlaySub.ZIndex = 12
-overlaySub.Parent = overlay
-
-local overlayControls = Instance.new("TextLabel")
-overlayControls.Text = "WASD jalan  •  E beli / ambil  •  Tombol di kanan: kunci, rebirth, upgrade, index"
-overlayControls.Font = LABEL_FONT
-overlayControls.TextSize = 16
-overlayControls.TextColor3 = Color3.fromRGB(200, 190, 220)
-overlayControls.BackgroundTransparency = 1
-overlayControls.Size = UDim2.new(1, 0, 0, 26)
-overlayControls.Position = UDim2.new(0, 0, 0.28, 120)
-overlayControls.ZIndex = 12
-overlayControls.Parent = overlay
-
-local startButton = makeButton(overlay, "MULAI MAIN", GOLD, UDim2.new(0, 220, 0, 56), UDim2.new(0.5, -110, 0.28, 170))
-startButton.TextSize = 24
-startButton.TextColor3 = Color3.fromRGB(30, 18, 0)
-startButton.ZIndex = 12
+-- Title overlay: fades out on click anywhere, or on its own after 8 seconds.
+local overlay = frame(gui, {
+	Name = "TitleOverlay",
+	Size = UDim2.fromScale(1, 1),
+	BackgroundColor3 = Color3.fromRGB(10, 5, 20),
+	BackgroundTransparency = 0.15,
+	BorderSizePixel = 0,
+})
+label(overlay, { Text = "PASAR BRAINROT", Font = TITLE_FONT, TextSize = 64, TextColor3 = GOLD, AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0.28, 0), Size = UDim2.new(1, 0, 0, 80) })
+label(overlay, { Text = "Beli brainrot, bawa pulang, jadi kaya!", Font = LABEL_FONT, TextSize = 20, TextColor3 = WHITE, AnchorPoint = Vector2.new(0.5, 0, 0.28, 84), Size = UDim2.new(1, 0, 0, 30) })
+label(overlay, { Text = "WASD jalan • E beli / ambil • Tombol di kanan: kunci, rebirth, upgrade, index", Font = LABEL_FONT, TextSize = 15, TextColor3 = Color3.fromRGB(200, 190, 220), AnchorPoint = Vector2.new(0.5, 0, 0.28, 122), Size = UDim2.new(1, 0, 0, 26) })
+local startButton = button(overlay, { Text = "MULAI MAIN", Font = TITLE_FONT, TextSize = 24, TextColor3 = Color3.fromRGB(30, 20, 0), BackgroundColor3 = GOLD, AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0.28, 170), Size = UDim2.fromOffset(240, 56), BorderSizePixel = 0 })
+corner(startButton, 12)
 
 local overlayGone = false
-local function hideOverlay()
+local function dismissOverlay()
 	if overlayGone then
 		return
 	end
 	overlayGone = true
-	TweenService:Create(overlay, TweenInfo.new(0.6), { BackgroundTransparency = 1 }):Play()
-	for _, child in ipairs({ overlayTitle, overlaySub, overlayControls }) do
-		TweenService:Create(child, TweenInfo.new(0.6), { TextTransparency = 1 }):Play()
+	local fade = TweenService:Create(overlay, TweenInfo.new(0.5), { BackgroundTransparency = 1 })
+	fade:Play()
+	for _, child in ipairs(overlay:GetDescendants()) do
+		if child:IsA("TextLabel") or child:IsA("TextButton") then
+			TweenService:Create(child, TweenInfo.new(0.5), { TextTransparency = 1, BackgroundTransparency = 1 }):Play()
+		end
 	end
-	TweenService:Create(startButton, TweenInfo.new(0.6), { BackgroundTransparency = 1, TextTransparency = 1 }):Play()
-	task.delay(0.65, function()
-		overlay:Destroy()
-	end)
+	fade.Completed:Wait()
+	overlay:Destroy()
+end
+startButton.MouseButton1Click:Connect(dismissOverlay)
+local overlayClick = button(overlay, { Text = "", BackgroundTransparency = 1, BorderSizePixel = 0, Size = UDim2.fromScale(1, 1), ZIndex = 0 })
+overlayClick.MouseButton1Click:Connect(dismissOverlay)
+task.delay(8, dismissOverlay)
+
+-- Live updates from leaderstats, player attributes and the wave timer.
+local function refreshMoneyLine()
+	local income = incomeValue.Value
+	local mult = player:GetAttribute("Multiplier") or 1
+	local rebirths = rebirthValue.Value
+	local title = player:GetAttribute("RebirthTitle") or "Pemula Pasar"
+	local multText
+	if mult == math.floor(mult) then
+		multText = "x" .. tostring(math.floor(mult))
+	else
+		multText = "x" .. string.format("%.2f", mult)
+	end
+	subLabel.Text = "$" .. income .. "/detik • " .. multText .. " • REBIRTH " .. rebirths .. " • " .. title
 end
 
-overlayClick.MouseButton1Click:Connect(hideOverlay)
-startButton.MouseButton1Click:Connect(hideOverlay)
-task.delay(8, hideOverlay)
+local function refreshRebirthButton()
+	local rebirths = rebirthValue.Value
+	local earned = player:GetAttribute("TotalEarned") or 0
+	local text = "REBIRTH MAX"
+	if rebirths < #REBIRTH_NEEDS then
+		text = "REBIRTH " .. compact(earned) .. "/" .. compact(REBIRTH_NEEDS[rebirths + 1])
+	end
+	if pcButtons.rebirth then
+		pcButtons.rebirth.Text = text
+	end
+	if touchButtons.rebirth then
+		touchButtons.rebirth.Text = text
+	end
+end
+
+local function refreshHint()
+	local carried = player:GetAttribute("CarriedNames") or ""
+	if carried ~= "" then
+		hintLabel.Text = "MEMBAWA: " .. carried .. " — bawa ke lapakmu untuk menaruh!"
+		hintLabel.TextColor3 = GOLD
+	else
+		hintLabel.Text = "Dekati brainrot di konveyor lalu tekan E untuk membeli"
+		hintLabel.TextColor3 = WHITE
+	end
+end
+
+local function refreshWave()
+	local seconds = waveTimer.Value
+	waveLabel.Text = "GEROBAK TSUNAMI " .. math.floor(seconds / 60) .. ":" .. string.format("%02d", seconds % 60)
+	waveLabel.TextColor3 = seconds < 15 and RED or PINK
+end
+
+cashValue.Changed:Connect(function()
+	cashLabel.Text = formatMoney(cashValue.Value)
+	TweenService:Create(cashScale, TweenInfo.new(0.12), { Scale = 1.12 }):Play()
+	task.delay(0.12, function()
+		TweenService:Create(cashScale, TweenInfo.new(0.15), { Scale = 1 }):Play()
+	end)
+end)
+incomeValue.Changed:Connect(refreshMoneyLine)
+rebirthValue.Changed:Connect(function()
+	refreshMoneyLine()
+	refreshRebirthButton()
+end)
+player:GetAttributeChangedSignal("Multiplier"):Connect(refreshMoneyLine)
+player:GetAttributeChangedSignal("TotalEarned"):Connect(refreshRebirthButton)
+player:GetAttributeChangedSignal("RebirthTitle"):Connect(refreshMoneyLine)
+player:GetAttributeChangedSignal("CarriedNames"):Connect(refreshHint)
+waveTimer.Changed:Connect(refreshWave)
+
+-- Lock button countdown, refreshed twice a second.
+task.spawn(function()
+	while true do
+		task.wait(0.5)
+		local lockedUntil = player:GetAttribute("BaseLockedUntil") or 0
+		local remaining = lockedUntil - os.time()
+		local text = "KUNCI LAPAK"
+		if remaining > 0 then
+			text = "TERKUNCI " .. remaining .. " dtk"
+		end
+		if pcButtons.lock then
+			pcButtons.lock.Text = text
+		end
+		if touchButtons.lock then
+			touchButtons.lock.Text = text
+		end
+	end
+end)
+
+remotes.Notify.OnClientEvent:Connect(function(text, kind)
+	showToast(text, kind)
+end)
+
+cashLabel.Text = formatMoney(cashValue.Value)
+refreshMoneyLine()
+refreshRebirthButton()
+refreshHint()
+refreshWave()

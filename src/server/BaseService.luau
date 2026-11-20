@@ -1,142 +1,124 @@
--- BaseService.luau
--- Owns the lapak: who has one, what they carry, what sits on their
--- pedestals, the lock, and stealing. Carrying welds a brainrot above the
--- player's head; walking home with it places it on the first free pedestal.
---
--- Two Roblox facts shape this module. First, a model's parts do not hold
--- together on their own: when a brainrot is carried, EVERY part gets a
--- WeldConstraint to the PrimaryPart, or only the PrimaryPart rides and the
--- rest falls through the world. Second, placement always uses the model's
--- measured BottomOffset, never its nominal height, or small brainrots sink
--- into their pedestals.
-
+-- BaseService: lapak assignment, carrying, placement, locking and stealing.
+-- A player buys a brainrot off the belt, carries it home above their head, and
+-- it earns money once it stands on one of their six pedestals.
 local Config = require(script.Parent.Config)
 local MoneyService = require(script.Parent.MoneyService)
 
-local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-
-local Notify = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Notify")
-
 local BaseService = {}
 
+local Workspace = game:GetService("Workspace")
+
 local bases = {}
-local playerBase = {} -- [player] = lapak record
-local baseOwner = {} -- [lapak record] = player
-local carried = {} -- [player] = list of models
-local beacons = {} -- [lapak record] = beacon folder
+local spawner = nil
+local remotes = nil
+local carriedBy = {} -- [player] = { models carried above their head }
 
-function BaseService.init(baseList)
-	bases = baseList
-end
-
-local function refreshCarriedNames(player)
-	local names = {}
-	for _, model in ipairs(carried[player] or {}) do
-		table.insert(names, model:GetAttribute("CharName") or "?")
+local function notify(player, text, kind)
+	if remotes then
+		remotes.Notify:FireClient(player, text, kind)
 	end
-	player:SetAttribute("CarriedNames", table.concat(names, ", "))
 end
 
-function BaseService.getBase(player)
-	return playerBase[player]
+local function inZone(position, base)
+	return math.abs(position.X - base.Center.X) <= Config.BASE_WIDTH / 2
+		and math.abs(position.Z - base.Center.Z) <= Config.BASE_DEPTH / 2
 end
 
-function BaseService.canCarry(player)
-	local state = MoneyService.get(player)
-	local capacity = state and state.CarryCapacity or 1
-	return #(carried[player] or {}) < capacity
-end
-
--- First come, first served. The new owner gets a glowing beacon above their
--- lapak with a floating LAPAKMU tag, so they can find home from anywhere.
-function BaseService.assignBase(player)
+local function getBase(player)
 	for _, base in ipairs(bases) do
-		if baseOwner[base] == nil then
-			baseOwner[base] = player
-			playerBase[player] = base
-			base.OwnerLabel.Text = player.DisplayName
-			player:SetAttribute("BaseIndex", base.Index)
-
-			local folder = Instance.new("Folder")
-			folder.Name = "Beacon"
-			local beam = Instance.new("Part")
-			beam.Name = "Beam"
-			beam.Size = Vector3.new(1.5, 13, 1.5)
-			beam.CFrame = CFrame.new(base.Center.X, 7.5, base.Center.Z)
-			beam.Color = base.Color
-			beam.Material = Enum.Material.Neon
-			beam.Transparency = 0.5
-			beam.Anchored = true
-			beam.CanCollide = false
-			beam.Parent = folder
-			local tag = Instance.new("BillboardGui")
-			tag.Adornee = beam
-			tag.Size = UDim2.new(0, 200, 0, 50)
-			tag.StudsOffsetWorldSpace = Vector3.new(0, 7.5, 0)
-			tag.AlwaysOnTop = true
-			tag.Parent = beam
-			local text = Instance.new("TextLabel")
-			text.Text = "LAPAKMU"
-			text.Font = Enum.Font.LuckiestGuy
-			text.TextSize = 30
-			text.TextColor3 = Color3.fromRGB(255, 183, 3)
-			text.BackgroundTransparency = 1
-			text.Size = UDim2.new(1, 0, 1, 0)
-			text.TextStrokeTransparency = 0.4
-			text.Parent = tag
-			folder.Parent = workspace
-			beacons[base] = folder
+		if base.Owner == player then
 			return base
 		end
 	end
 	return nil
 end
 
--- Freeing a lapak destroys what stood on it, clears the owner and lock,
--- resets the sign and takes the beacon down.
+local function syncCarriedNames(player)
+	local names = {}
+	for _, model in ipairs(carriedBy[player] or {}) do
+		table.insert(names, model:GetAttribute("CharName"))
+	end
+	player:SetAttribute("CarriedNames", table.concat(names, ", "))
+end
+
+function BaseService.init(baseList, spawnerModule, remoteFolder)
+	bases = baseList
+	spawner = spawnerModule
+	remotes = remoteFolder
+end
+
+-- A tall glowing beam plus a floating LAPAKMU tag, so the player can find their
+-- own lapak from across the market.
+local function createBeacon(base)
+	local beam = Instance.new("Part")
+	beam.Name = "BaseBeacon"
+	beam.Anchored = true
+	beam.CanCollide = false
+	beam.Size = Vector3.new(1.5, 13, 1.5)
+	beam.CFrame = CFrame.new(base.Center.X, 7, base.Center.Z)
+	beam.Color = base.Color
+	beam.Material = Enum.Material.Neon
+	beam.Transparency = 0.5
+	beam.Parent = Workspace
+	local tag = Instance.new("BillboardGui")
+	tag.Adornee = beam
+	tag.Size = UDim2.fromOffset(160, 40)
+	tag.StudsOffsetWorldSpace = Vector3.new(0, 7.5, 0)
+	tag.AlwaysOnTop = true
+	tag.LightInfluence = 0
+	tag.Parent = beam
+	local label = Instance.new("TextLabel")
+	label.BackgroundTransparency = 1
+	label.Text = "LAPAKMU"
+	label.Font = Enum.Font.LuckiestGuy
+	label.TextSize = 24
+	label.TextColor3 = base.Color
+	label.TextStrokeTransparency = 0.5
+	label.Size = UDim2.new(1, 0, 1, 0)
+	label.Parent = tag
+	base.Beacon = beam
+end
+
+function BaseService.assignBase(player)
+	for _, base in ipairs(bases) do
+		if base.Owner == nil then
+			base.Owner = player
+			base.SignOwner.Text = player.DisplayName
+			player:SetAttribute("BaseIndex", base.Index)
+			createBeacon(base)
+			return base
+		end
+	end
+	return nil
+end
+
 function BaseService.freeBase(player)
-	local base = playerBase[player]
+	local base = getBase(player)
 	if not base then
 		return
 	end
 	for _, pedestal in ipairs(base.Pedestals) do
-		if pedestal.Model then
-			pedestal.Model:Destroy()
-			pedestal.Model = nil
+		if pedestal.Occupant then
+			pedestal.Occupant:Destroy()
+			pedestal.Occupant = nil
 		end
 	end
-	baseOwner[base] = nil
-	playerBase[player] = nil
-	base.OwnerLabel.Text = "Kosong"
-	base.LockLabel.Visible = false
+	base.Owner = nil
 	base.LockedUntil = 0
-	base.CooldownUntil = 0
-	local beacon = beacons[base]
-	if beacon then
-		beacon:Destroy()
-		beacons[base] = nil
+	base.LockCooldownUntil = 0
+	base.SignOwner.Text = "Kosong"
+	base.SignLock.Visible = false
+	if base.Beacon then
+		base.Beacon:Destroy()
+		base.Beacon = nil
 	end
+	player:SetAttribute("BaseIndex", 0)
+	player:SetAttribute("BaseLockedUntil", 0)
 end
 
--- Weld a brainrot above the player's head. Carried models stack by their real
--- measured heights with a small gap, starting 1.2 studs above the head.
-function BaseService.carry(player, model)
-	local character = player.Character
-	if not character then
-		return
-	end
-	local head = character:FindFirstChild("Head")
-	if not head then
-		return
-	end
-	for _, descendant in ipairs(model:GetDescendants()) do
-		if descendant:IsA("BasePart") then
-			descendant.Anchored = false
-			descendant.CanCollide = false
-			descendant.Massless = true
-		end
-	end
+-- Roblox does not hold a model's parts together on its own: weld every part to
+-- the PrimaryPart, or only the PrimaryPart rides and the rest falls through.
+local function weldModelTogether(model)
 	local primary = model.PrimaryPart
 	for _, descendant in ipairs(model:GetDescendants()) do
 		if descendant:IsA("BasePart") and descendant ~= primary then
@@ -146,232 +128,278 @@ function BaseService.carry(player, model)
 			weld.Parent = primary
 		end
 	end
-	local stackY = head.Position.Y + head.Size.Y / 2 + 1.2
-	for _, other in ipairs(carried[player] or {}) do
-		stackY = stackY + (other:GetAttribute("BottomOffset") or 0) + (other:GetAttribute("TopOffset") or 0) + 0.3
-	end
-	local bottom = model:GetAttribute("BottomOffset") or 0
-	model:PivotTo(CFrame.new(head.Position.X, stackY + bottom, head.Position.Z))
-	local hold = Instance.new("WeldConstraint")
-	hold.Part0 = head
-	hold.Part1 = primary
-	hold.Parent = primary
-	local prompt = primary:FindFirstChild("BuyPrompt")
-	if prompt then
-		prompt.Enabled = false
-	end
-	local list = carried[player] or {}
-	table.insert(list, model)
-	carried[player] = list
-	refreshCarriedNames(player)
 end
 
--- Set a carried brainrot down on a pedestal: welds off, parts anchored
--- again, bottom resting on the pedestal top, facing the market centre.
--- North lapak face +Z; south lapak turn around to face -Z.
-local function placeOnPedestal(player, base, pedestal, model)
+local function destroyWelds(model)
 	for _, descendant in ipairs(model:GetDescendants()) do
 		if descendant:IsA("WeldConstraint") then
 			descendant:Destroy()
 		end
 	end
+end
+
+function BaseService.carry(player, model)
+	local character = player.Character
+	local head = character and character:FindFirstChild("Head")
+	if not head then
+		return false
+	end
+	for _, descendant in ipairs(model:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.Anchored = false
+			descendant.CanCollide = false
+			descendant.Massless = true
+		end
+	end
+	weldModelTogether(model)
+	local prompt = model.PrimaryPart:FindFirstChildOfClass("ProximityPrompt")
+	if prompt then
+		prompt.Enabled = false
+	end
+	-- Stack by measured size: the first rides 1.2 above the head, each next one
+	-- on top of the previous with a small gap.
+	local carried = carriedBy[player] or {}
+	local bottom = head.Position.Y + head.Size.Y / 2 + 1.2
+	for _, other in ipairs(carried) do
+		bottom += other:GetAttribute("BottomOffset") + other:GetAttribute("TopOffset") + 0.3
+	end
+	local pivotY = bottom + model:GetAttribute("BottomOffset")
+	model:PivotTo(CFrame.new(head.Position.X, pivotY, head.Position.Z))
+	local attach = Instance.new("WeldConstraint")
+	attach.Part0 = head
+	attach.Part1 = model.PrimaryPart
+	attach.Parent = model.PrimaryPart
+	table.insert(carried, model)
+	carriedBy[player] = carried
+	model:SetAttribute("State", "carried")
+	model:SetAttribute("Owner", tostring(player.UserId))
+	syncCarriedNames(player)
+	return true
+end
+
+local function placeModel(player, base, model, pedestal)
+	destroyWelds(model)
 	for _, descendant in ipairs(model:GetDescendants()) do
 		if descendant:IsA("BasePart") then
 			descendant.Anchored = true
 			descendant.CanCollide = false
-			descendant.Massless = false
 		end
 	end
-	local bottom = model:GetAttribute("BottomOffset") or 0
-	local facing = base.Center.Z < 0 and 0 or math.rad(180)
-	model:PivotTo(CFrame.new(pedestal.Top.X, pedestal.Top.Y + bottom + 0.05, pedestal.Top.Z) * CFrame.Angles(0, facing, 0))
+	-- Face the market centre: north lapak face +Z, south lapak face -Z.
+	local yaw = base.Center.Z < 0 and 0 or math.rad(180)
+	model:PivotTo(CFrame.new(
+		pedestal.Top.X,
+		pedestal.Top.Y + model:GetAttribute("BottomOffset") + 0.05,
+		pedestal.Top.Z
+	) * CFrame.Angles(0, yaw, 0))
+	pedestal.Occupant = model
 	model:SetAttribute("State", "placed")
 	model:SetAttribute("Owner", tostring(player.UserId))
-	pedestal.Model = model
-	local prompt = model.PrimaryPart:FindFirstChild("BuyPrompt")
+	local prompt = model.PrimaryPart:FindFirstChildOfClass("ProximityPrompt")
 	if prompt then
 		prompt.ActionText = "AMBIL"
 		prompt.Enabled = true
 	end
 	local tag = model.PrimaryPart:FindFirstChild("NameTag")
-	local priceLine = tag and tag:FindFirstChild("PriceLine")
-	if priceLine then
-		priceLine.Visible = false
-	end
-	Notify:FireClient(player, "Ditaruh! +" .. (model:GetAttribute("Rate") or 0) .. "$/detik", "place")
-end
-
--- A carrying player standing inside their own lapak zone places what they
--- carry on the first free pedestals. One bad model must never kill the loop,
--- so each placement runs protected.
-local function tryPlace(player)
-	local base = playerBase[player]
-	if not base then
-		return
-	end
-	local list = carried[player]
-	if not list or #list == 0 then
-		return
-	end
-	local character = player.Character
-	local root = character and character:FindFirstChild("HumanoidRootPart")
-	if not root then
-		return
-	end
-	local pos = root.Position
-	if math.abs(pos.X - base.Center.X) > 13 or math.abs(pos.Z - base.Center.Z) > 10 then
-		return
-	end
-	local remaining = {}
-	for _, model in ipairs(list) do
-		local pedestal = nil
-		for _, candidate in ipairs(base.Pedestals) do
-			if candidate.Model == nil then
-				pedestal = candidate
-				break
-			end
-		end
-		if not pedestal then
-			Notify:FireClient(player, "Lapakmu penuh!", "bad")
-			table.insert(remaining, model)
-		else
-			local ok = pcall(placeOnPedestal, player, base, pedestal, model)
-			if not ok then
-				table.insert(remaining, model)
-			end
+	if tag then
+		local priceLine = tag:FindFirstChild("PriceLine")
+		if priceLine then
+			priceLine.Visible = false
 		end
 	end
-	carried[player] = remaining
-	refreshCarriedNames(player)
+	local carried = carriedBy[player] or {}
+	for i, other in ipairs(carried) do
+		if other == model then
+			table.remove(carried, i)
+			break
+		end
+	end
+	syncCarriedNames(player)
+	notify(player, model:GetAttribute("CharName") .. " ditaruh! +$" .. model:GetAttribute("Rate") .. "/detik", "place")
 end
 
--- Lock your own lapak for 30 seconds; afterwards the lock rests 90 seconds.
+local function firstFreePedestal(base)
+	for _, pedestal in ipairs(base.Pedestals) do
+		if pedestal.Occupant == nil then
+			return pedestal
+		end
+	end
+	return nil
+end
+
+-- Every quarter second, players carrying brainrots inside their own lapak zone
+-- place them on the first free pedestals. One bad model must never kill the loop.
+local function placementLoop()
+	task.spawn(function()
+		while true do
+			task.wait(0.25)
+			for player, carried in pairs(carriedBy) do
+				if #carried > 0 then
+					local base = getBase(player)
+					local character = player.Character
+					local root = character and character:FindFirstChild("HumanoidRootPart")
+					if base and root and inZone(root.Position, base) then
+						for _, model in ipairs(table.clone(carried)) do
+							local pedestal = firstFreePedestal(base)
+							if pedestal then
+								pcall(placeModel, player, base, model, pedestal)
+							else
+								notify(player, "Lapak penuh!", "bad")
+								break
+							end
+						end
+					end
+				end
+			end
+		end
+	end)
+end
+
 function BaseService.lockBase(player)
-	local base = playerBase[player]
+	local base = getBase(player)
 	if not base then
 		return false, "Kamu belum punya lapak!"
 	end
 	local now = os.time()
 	if base.LockedUntil > now then
-		return false, "Lapakmu sudah terkunci!"
+		return false, "Lapak sudah terkunci!"
 	end
-	if base.CooldownUntil > now then
-		return false, "Kunci masih cooldown (" .. (base.CooldownUntil - now) .. " dtk)."
+	if base.LockCooldownUntil > now then
+		return false, "Kunci masih cooldown " .. (base.LockCooldownUntil - now) .. " detik!"
 	end
-	base.LockedUntil = now + Config.Lock.Duration
-	base.CooldownUntil = now + Config.Lock.Duration + Config.Lock.Cooldown
+	base.LockedUntil = now + Config.LOCK.Duration
+	base.LockCooldownUntil = now + Config.LOCK.Duration + Config.LOCK.Cooldown
 	player:SetAttribute("BaseLockedUntil", base.LockedUntil)
-	return true, "Lapak terkunci selama " .. Config.Lock.Duration .. " detik!"
+	return true, "Lapak terkunci 30 detik!"
 end
 
--- Triggering the prompt on a placed brainrot: take your own back, or steal
--- someone else's — unless their lapak is locked, or your hands are full.
-function BaseService.take(player, model)
-	if model:GetAttribute("State") ~= "placed" then
-		return
-	end
-	local ownerId = model:GetAttribute("Owner") or ""
-	local owner = ownerId ~= "" and Players:GetPlayerByUserId(tonumber(ownerId)) or nil
-	local homeBase, homePedestal = nil, nil
-	for _, base in ipairs(bases) do
-		for _, pedestal in ipairs(base.Pedestals) do
-			if pedestal.Model == model then
-				homeBase, homePedestal = base, pedestal
-				break
-			end
-		end
-		if homeBase then
-			break
-		end
-	end
-	if homeBase and homeBase.LockedUntil > os.time() and owner ~= player then
-		Notify:FireClient(player, "Lapak ini terkunci!", "bad")
-		return
-	end
-	if not BaseService.canCarry(player) then
-		Notify:FireClient(player, "Tanganmu penuh!", "bad")
-		return
-	end
-	if homePedestal then
-		homePedestal.Model = nil
-	end
-	model:SetAttribute("State", "carried")
-	BaseService.carry(player, model)
-	local name = model:GetAttribute("CharName") or "brainrot"
-	if owner and owner ~= player then
-		Notify:FireClient(player, "Kamu mencuri " .. name .. "!", "steal")
-		Notify:FireClient(owner, player.DisplayName .. " mencuri " .. name .. " darimu!", "bad")
-	else
-		Notify:FireClient(player, "Kamu mengambil " .. name .. ".", "info")
-	end
-end
-
--- The dollars per second a player's placed brainrots pay, before multipliers.
-function BaseService.placedIncome(player)
-	local base = playerBase[player]
-	if not base then
-		return 0
-	end
-	local total = 0
-	for _, pedestal in ipairs(base.Pedestals) do
-		if pedestal.Model then
-			total = total + (pedestal.Model:GetAttribute("Rate") or 0)
-		end
-	end
-	return total
-end
-
--- Is this position inside any lapak zone? The tsunami spares those players.
-function BaseService.isOnAnyBase(position)
-	for _, base in ipairs(bases) do
-		if math.abs(position.X - base.Center.X) <= 13 and math.abs(position.Z - base.Center.Z) <= 10 then
-			return true
-		end
-	end
-	return false
-end
-
--- Drop everything a player carries: welds off, models handed back so the
--- caller can send them to the conveyor.
-function BaseService.dropCarried(player)
-	local list = carried[player] or {}
-	carried[player] = {}
-	for _, model in ipairs(list) do
-		for _, descendant in ipairs(model:GetDescendants()) do
-			if descendant:IsA("WeldConstraint") then
-				descendant:Destroy()
-			end
-		end
-	end
-	refreshCarriedNames(player)
-	return list
-end
-
--- The placement loop (four times a second) and the lock display loop (twice
--- a second, keeping every sign's TERKUNCI countdown in sync).
-function BaseService.startLoops()
-	task.spawn(function()
-		while true do
-			task.wait(0.25)
-			for _, player in ipairs(Players:GetPlayers()) do
-				pcall(tryPlace, player)
-			end
-		end
-	end)
+local function lockDisplayLoop()
 	task.spawn(function()
 		while true do
 			task.wait(0.5)
 			local now = os.time()
 			for _, base in ipairs(bases) do
 				if base.LockedUntil > now then
-					base.LockLabel.Text = "TERKUNCI " .. (base.LockedUntil - now) .. " dtk"
-					base.LockLabel.Visible = true
+					base.SignLock.Text = "TERKUNCI " .. (base.LockedUntil - now) .. " dtk"
+					base.SignLock.Visible = true
 				else
-					base.LockLabel.Visible = false
+					base.SignLock.Visible = false
 				end
 			end
 		end
 	end)
+end
+
+local function takePlaced(player, model)
+	local ownerId = model:GetAttribute("Owner")
+	local state = MoneyService.getState(player)
+	local carried = carriedBy[player] or {}
+	if state and #carried >= state.CarryCap then
+		notify(player, "Tangan penuh!", "bad")
+		return
+	end
+	local wasSteal = ownerId ~= "" and ownerId ~= tostring(player.UserId)
+	if wasSteal then
+		for _, base in ipairs(bases) do
+			if base.Owner and tostring(base.Owner.UserId) == ownerId and base.LockedUntil > os.time() then
+				notify(player, "Lapak itu terkunci!", "bad")
+				return
+			end
+		end
+	end
+	for _, base in ipairs(bases) do
+		for _, pedestal in ipairs(base.Pedestals) do
+			if pedestal.Occupant == model then
+				pedestal.Occupant = nil
+			end
+		end
+	end
+	local victim = nil
+	if wasSteal then
+		for _, base in ipairs(bases) do
+			if base.Owner and tostring(base.Owner.UserId) == ownerId then
+				victim = base.Owner
+			end
+		end
+	end
+	if BaseService.carry(player, model) then
+		if wasSteal then
+			notify(player, "Kamu mencuri " .. model:GetAttribute("CharName") .. "!", "steal")
+			if victim then
+				notify(victim, model:GetAttribute("CharName") .. " dicuri " .. player.DisplayName .. "!", "bad")
+			end
+		else
+			notify(player, "Kamu mengambil " .. model:GetAttribute("CharName") .. ".", "info")
+		end
+	end
+end
+
+-- One prompt per brainrot for its whole life: on the conveyor it buys, on a
+-- lapak it takes (steal from others, pick up your own).
+function BaseService.handlePrompt(player, model)
+	local character = player.Character
+	if not character or not character:FindFirstChild("Head") then
+		return
+	end
+	local stateName = model:GetAttribute("State")
+	if stateName == "conveyor" then
+		local state = MoneyService.getState(player)
+		local carried = carriedBy[player] or {}
+		if state and #carried >= state.CarryCap then
+			notify(player, "Tangan penuh!", "bad")
+			return
+		end
+		local price = model:GetAttribute("Price")
+		if not MoneyService.spend(player, price) then
+			notify(player, "Uang tidak cukup! Butuh $" .. price .. ".", "bad")
+			return
+		end
+		spawner.removeFromBelt(model)
+		if BaseService.carry(player, model) then
+			notify(player, "Kamu membeli " .. model:GetAttribute("CharName") .. "!", "buy")
+		end
+	elseif stateName == "placed" then
+		takePlaced(player, model)
+	end
+end
+
+function BaseService.placedIncome(player)
+	local base = getBase(player)
+	if not base then
+		return 0
+	end
+	local total = 0
+	for _, pedestal in ipairs(base.Pedestals) do
+		if pedestal.Occupant then
+			total += pedestal.Occupant:GetAttribute("Rate")
+		end
+	end
+	return total
+end
+
+-- Drops everything the player carries; the caller sends the models back to the belt.
+function BaseService.dropAll(player)
+	local carried = carriedBy[player] or {}
+	carriedBy[player] = {}
+	player:SetAttribute("CarriedNames", "")
+	for _, model in ipairs(carried) do
+		destroyWelds(model)
+	end
+	return carried
+end
+
+function BaseService.isInAnyBase(position)
+	for _, base in ipairs(bases) do
+		if inZone(position, base) then
+			return true
+		end
+	end
+	return false
+end
+
+function BaseService.startLoops()
+	placementLoop()
+	lockDisplayLoop()
 end
 
 return BaseService

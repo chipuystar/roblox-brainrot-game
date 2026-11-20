@@ -1,146 +1,115 @@
--- MoneyService.luau
--- Owns every player's money: cash, lifetime earnings, rebirth count and
--- upgrade levels. The numbers live in a server table and are mirrored to the
--- player's leaderstats (Cash, Income, Rebirths) and attributes, which is
--- what the HUD reads. Nothing else in the game touches cash directly.
-
+-- MoneyService: per-player cash, lifetime earnings, rebirths and upgrades,
+-- mirrored to leaderstats and to player attributes the HUD reads.
 local Config = require(script.Parent.Config)
 
 local MoneyService = {}
 
-local states = {} -- [player] = state table
+local states = {} -- [player] = { Cash, Earned, Rebirths, SpeedLevel, CarryCap, IncomeLevel }
 
--- The income multiplier from rebirths and the income upgrade.
-function MoneyService.multiplier(player)
-	local state = states[player]
-	if not state then
-		return 1
-	end
-	return (1 + Config.RebirthBonus * state.Rebirths) * (1 + Config.IncomeBonus * state.IncomeLevel)
+function MoneyService.multiplier(state)
+	return (1 + Config.REBIRTH_BONUS * state.Rebirths) * (1 + Config.INCOME_BONUS * state.IncomeLevel)
 end
 
--- Push the state into the player's attributes for the HUD.
-local function syncAttributes(player, state)
-	player:SetAttribute("TotalEarned", state.TotalEarned)
-	player:SetAttribute("Multiplier", MoneyService.multiplier(player))
-	player:SetAttribute("SpeedLevel", state.SpeedLevel)
-	player:SetAttribute("CarryCapacity", state.CarryCapacity)
-	player:SetAttribute("IncomeLevel", state.IncomeLevel)
-	player:SetAttribute("RebirthTitle", state.Title)
-end
-
--- Push the state into leaderstats and attributes at once.
 function MoneyService.sync(player)
 	local state = states[player]
 	if not state then
 		return
 	end
-	local board = player:FindFirstChild("leaderstats")
-	if board then
-		board.Cash.Value = state.Cash
-		board.Rebirths.Value = state.Rebirths
+	local leaderstats = player:FindFirstChild("leaderstats")
+	if leaderstats then
+		local cash = leaderstats:FindFirstChild("Cash")
+		if cash then
+			cash.Value = state.Cash
+		end
+		local rebirths = leaderstats:FindFirstChild("Rebirths")
+		if rebirths then
+			rebirths.Value = state.Rebirths
+		end
 	end
-	syncAttributes(player, state)
+	player:SetAttribute("TotalEarned", state.Earned)
+	player:SetAttribute("Multiplier", MoneyService.multiplier(state))
+	player:SetAttribute("SpeedLevel", state.SpeedLevel)
+	player:SetAttribute("CarryCapacity", state.CarryCap)
+	player:SetAttribute("IncomeLevel", state.IncomeLevel)
 end
 
 function MoneyService.setupPlayer(player)
 	local state = {
-		Cash = Config.StartCash,
-		TotalEarned = 0,
+		Cash = Config.START_CASH,
+		Earned = 0,
 		Rebirths = 0,
 		SpeedLevel = 0,
-		CarryCapacity = 1,
+		CarryCap = 1,
 		IncomeLevel = 0,
-		Title = "Pemula Pasar",
 	}
 	states[player] = state
-
-	local board = Instance.new("Folder")
-	board.Name = "leaderstats"
-	board.Parent = player
+	local leaderstats = Instance.new("Folder")
+	leaderstats.Name = "leaderstats"
+	leaderstats.Parent = player
 	local cash = Instance.new("IntValue")
 	cash.Name = "Cash"
 	cash.Value = state.Cash
-	cash.Parent = board
+	cash.Parent = leaderstats
 	local income = Instance.new("IntValue")
 	income.Name = "Income"
 	income.Value = 0
-	income.Parent = board
+	income.Parent = leaderstats
 	local rebirths = Instance.new("IntValue")
 	rebirths.Name = "Rebirths"
 	rebirths.Value = 0
-	rebirths.Parent = board
-
-	-- Defaults for the attributes the lapak service owns, so the HUD never
-	-- reads a nil before the player gets a base.
-	player:SetAttribute("BaseIndex", 0)
-	player:SetAttribute("BaseLockedUntil", 0)
+	rebirths.Parent = leaderstats
+	player:SetAttribute("TotalEarned", 0)
+	player:SetAttribute("Multiplier", 1)
+	player:SetAttribute("SpeedLevel", 0)
+	player:SetAttribute("CarryCapacity", 1)
+	player:SetAttribute("IncomeLevel", 0)
 	player:SetAttribute("CarriedNames", "")
-	syncAttributes(player, state)
+	player:SetAttribute("BaseLockedUntil", 0)
+	player:SetAttribute("BaseIndex", 0)
+	player:SetAttribute("RebirthTitle", "Pemula Pasar")
+	return state
 end
 
 function MoneyService.removePlayer(player)
 	states[player] = nil
 end
 
-function MoneyService.get(player)
+function MoneyService.getState(player)
 	return states[player]
 end
 
-function MoneyService.canAfford(player, amount)
-	local state = states[player]
-	return state ~= nil and state.Cash >= amount
-end
-
--- Spend money, or spend nothing and return false when the player is short.
+-- Spends nothing and returns false when the player cannot afford it.
 function MoneyService.spend(player, amount)
 	local state = states[player]
 	if not state or state.Cash < amount then
 		return false
 	end
-	state.Cash = state.Cash - amount
-	local board = player:FindFirstChild("leaderstats")
-	if board then
-		board.Cash.Value = state.Cash
-	end
+	state.Cash -= amount
+	MoneyService.sync(player)
 	return true
 end
 
--- Set the cash outright (a rebirth resets it to the rebirth amount).
-function MoneyService.setCash(player, amount)
-	local state = states[player]
-	if not state then
-		return
-	end
-	state.Cash = amount
-	local board = player:FindFirstChild("leaderstats")
-	if board then
-		board.Cash.Value = state.Cash
-	end
-end
-
--- The income loop: every second, each player's placed brainrots pay their
--- rates times the player's multiplier, rounded to the nearest dollar. The
--- Income leaderstat shows what this tick paid, so the HUD's $/detik line is
--- always the live number.
-function MoneyService.startIncomeLoop(placedRateFn)
+-- Every second, each player's placed brainrots pay their rates times the
+-- player's multiplier; the Income leaderstat shows the dollars of that tick.
+function MoneyService.startIncomeLoop(placedIncomeFn)
 	task.spawn(function()
 		while true do
 			task.wait(1)
 			for player, state in pairs(states) do
-				local baseRate = placedRateFn(player) or 0
-				local paid = math.floor(baseRate * MoneyService.multiplier(player) + 0.5)
-				if paid > 0 then
-					state.Cash = state.Cash + paid
-					state.TotalEarned = state.TotalEarned + paid
+				local rate = placedIncomeFn(player)
+				local gain = math.floor(rate * MoneyService.multiplier(state) + 0.5)
+				if gain > 0 then
+					state.Cash += gain
+					state.Earned += gain
 				end
-				local board = player:FindFirstChild("leaderstats")
-				if board then
-					board.Cash.Value = state.Cash
-					board.Income.Value = paid
+				local leaderstats = player:FindFirstChild("leaderstats")
+				if leaderstats then
+					local income = leaderstats:FindFirstChild("Income")
+					if income then
+						income.Value = gain
+					end
 				end
-				player:SetAttribute("TotalEarned", state.TotalEarned)
-				player:SetAttribute("Multiplier", MoneyService.multiplier(player))
+				MoneyService.sync(player)
 			end
 		end
 	end)

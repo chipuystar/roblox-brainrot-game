@@ -1,44 +1,36 @@
--- Music.client.luau
--- Background music for Pasar Brainrot: a looping track that starts when the
--- client loads, with a mute toggle driven by the MUSIK button in GameUI.
--- The Sound lives in SoundService (never under the character), so it keeps
--- playing through respawns.
-
+-- Music: owns the background track. "Happy Song" by APM Music / Justement Music,
+-- looping, keeps playing through respawns (this script runs in
+-- StarterPlayerScripts and is never tied to the character). The MUSIK button in
+-- the HUD fires the MusicToggle event to pause and resume it.
 local SoundService = game:GetService("SoundService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local TRACK_ID = "rbxassetid://1843404009" -- "Happy Song" (APM Music)
-local SOUND_NAME = "PasarBrainrotMusic"
-local TOGGLE_EVENT_NAME = "MusicToggle"
-local VOLUME = 0.5
+local TRACK_ID = "rbxassetid://1843404009"
 
--- StarterPlayerScripts re-runs this script on every respawn. If the Sound is
--- already there, leave it alone: never restart the track, never stack a
--- second copy on top, and never undo the player's mute.
-local music = SoundService:FindFirstChild(SOUND_NAME)
+local music = SoundService:FindFirstChild("PasarBrainrotMusic")
 if not music then
 	music = Instance.new("Sound")
-	music.Name = SOUND_NAME
+	music.Name = "PasarBrainrotMusic"
 	music.SoundId = TRACK_ID
 	music.Looped = true
-	music.Volume = VOLUME
+	music.Volume = 0.5
 	music.Parent = SoundService
 	music:Play()
 end
+-- When the Sound already exists (a client re-run), the track is left exactly
+-- as it is: never restarted, never duplicated, never un-muted.
 
--- One shared event for the mute button. Find it, or create it here, so the
--- button works even if it is built before this script runs.
-local toggleEvent = ReplicatedStorage:FindFirstChild(TOGGLE_EVENT_NAME)
-if not toggleEvent then
-	toggleEvent = Instance.new("BindableEvent")
-	toggleEvent.Name = TOGGLE_EVENT_NAME
-	toggleEvent.Parent = ReplicatedStorage
+local toggle = ReplicatedStorage:FindFirstChild("MusicToggle")
+if not toggle then
+	toggle = Instance.new("BindableEvent")
+	toggle.Name = "MusicToggle"
+	toggle.Parent = ReplicatedStorage
 end
 
-toggleEvent.Event:Connect(function()
+toggle.Event:Connect(function()
 	if music.Playing then
 		music:Pause()
 	else
-		music:Play()
+		music:Resume()
 	end
 end)

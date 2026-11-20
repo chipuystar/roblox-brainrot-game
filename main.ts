@@ -1,57 +1,51 @@
-// main.ts — the Pasar Brainrot entrypoint (Node 22, standard library only).
+// Pasar Brainrot — the make.fun roblox-brainrot-01 entrypoint (Node 22, standard library only).
 //
-// It hands the game in: it copies the Rojo-built place, the Luau sources,
-// the screenshots and PLAY.json from beside this file into the output
-// directory, then writes the dossier the judge reads with the kit's
-// vendored library. The grader runs it twice and both runs must write the
-// same bytes, so nothing here depends on the clock or on chance.
+// This program hands the game in. It copies the built place (game.rbxl), the Luau sources
+// (src/), the screenshots (screenshots/) and the play link (PLAY.json) from beside this file
+// into the output directory, then writes the dossier the judge reads with the vendored
+// make.fun library.
 //
-// Every name under /output starts with a letter, a digit or _ and holds only
-// letters, digits, . _ and -: a dotted name such as .gitkeep anywhere under
-// it fails the entry. The copy below skips every file and directory whose
-// name starts with a dot, at every depth.
-//
-// Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
+// Run it the way the grader does:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+//
+// The grader refuses any name under /output that does not start with a letter, a digit or _,
+// so dotted names (.gitkeep, .DS_Store, .git) are filtered out at every depth while copying.
 
-import { copyFileSync, existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { copyFileSync, cpSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildDossier } from "./vendor/makefun-roblox.ts";
 
 const repoRoot = fileURLToPath(new URL(".", import.meta.url));
 const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? "/output";
 
-// Copy a directory tree, leaving out every entry whose name starts with a dot.
-function copyTree(fromDir: string, toDir: string): void {
-	mkdirSync(toDir, { recursive: true });
-	for (const entry of readdirSync(fromDir, { withFileTypes: true })) {
-		if (entry.name.startsWith(".")) {
-			continue;
-		}
-		const from = join(fromDir, entry.name);
-		const to = join(toDir, entry.name);
-		if (entry.isDirectory()) {
-			copyTree(from, to);
-		} else if (entry.isFile()) {
-			copyFileSync(from, to);
-		}
-	}
+// cpSync filter: skip every file and directory whose name starts with a dot.
+function isVisible(entryPath: string): boolean {
+	return !basename(entryPath).startsWith(".");
 }
 
 mkdirSync(outDir, { recursive: true });
-copyFileSync(join(repoRoot, "game.rbxl"), join(outDir, "game.rbxl"));
-copyFileSync(join(repoRoot, "PLAY.json"), join(outDir, "PLAY.json"));
-copyTree(join(repoRoot, "src"), join(outDir, "src"));
-if (existsSync(join(repoRoot, "screenshots"))) {
-	copyTree(join(repoRoot, "screenshots"), join(outDir, "screenshots"));
+
+// Fail fast with a readable message when the place has not been built yet.
+if (!existsSync(join(repoRoot, "game.rbxl"))) {
+	throw new Error("game.rbxl is missing: build it first with `rojo build default.project.json --output game.rbxl`.");
 }
 
-// The scorer's own caps: only text_max_bytes shapes the bytes; the others
-// refuse an entry the scorer would refuse (more than 4 screenshots or one
-// over 256 KiB; a place of more than 500000 instances, whose scripts'
-// sources come to over 8 MiB or whose scripts' paths come to over 1048576
-// characters, in all).
+copyFileSync(join(repoRoot, "game.rbxl"), join(outDir, "game.rbxl"));
+copyFileSync(join(repoRoot, "PLAY.json"), join(outDir, "PLAY.json"));
+cpSync(join(repoRoot, "src"), join(outDir, "src"), { recursive: true, filter: isVisible });
+mkdirSync(join(outDir, "screenshots"), { recursive: true });
+if (existsSync(join(repoRoot, "screenshots"))) {
+	cpSync(join(repoRoot, "screenshots"), join(outDir, "screenshots"), {
+		recursive: true,
+		filter: isVisible,
+	});
+}
+
+// The scorer's own caps: text_max_bytes shapes the dossier text; the rest refuse an entry
+// the scorer would refuse (more than 4 screenshots, or one over 256 KiB; a place of more
+// than 500000 instances, whose scripts' sources come to over 8 MiB, or whose scripts'
+// paths come to over 1048576 characters in all).
 const dossier = buildDossier(outDir, {
 	text_max_bytes: 65536,
 	screenshots: { max: 4, max_bytes: 262144 },
@@ -60,7 +54,3 @@ const dossier = buildDossier(outDir, {
 	scripts_max_path_chars: 1048576,
 });
 writeFileSync(join(outDir, "dossier.json"), dossier);
-
-// A one-line summary on stdout for the human running the hand-in; the grader
-// only reads /output, so this changes no byte it checks.
-console.log(`Pasar Brainrot handed in: ${dossier.length} bytes of dossier in ${outDir}.`);

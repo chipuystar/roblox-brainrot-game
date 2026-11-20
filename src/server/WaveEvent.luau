@@ -1,140 +1,141 @@
--- WaveEvent.luau
--- The Gerobak Tsunami: every 90 seconds (75 for the first wave) a warning
--- goes out, then a glowing blue wall with eight runaway carts sweeps the
--- market from west to east over 12 seconds. Players standing on any lapak
--- are safe; anyone caught in the open is knocked flying and drops what they
--- carry, and the dropped brainrots go back to the conveyor.
---
--- Hit detection tests each player's position against the wall directly every
--- heartbeat. A touch event on a wall that moves by setting its position is
--- unreliable, and the wall does not collide, so there is no touch to catch.
--- The fling itself is applied on the CLIENT (see Effects): a velocity the
--- server sets on a client-owned character is overwritten by the client's
--- own physics, so the server only tells the client, and the client flings
--- itself.
-
+-- WaveEvent: the Gerobak Tsunami. A countdown runs on the shared WaveTimer,
+-- a warning goes out, then a glowing wall with eight runaway carts sweeps the
+-- market and knocks down anyone caught outside a lapak. Players standing on any
+-- lapak are safe. Hit detection tests each player's position against the wall
+-- every heartbeat: a touch event on a fast-moving non-colliding wall is unreliable.
 local Config = require(script.Parent.Config)
-
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-
-local Remotes = ReplicatedStorage:WaitForChild("Remotes")
-local Notify = Remotes:WaitForChild("Notify")
-local WaveSignal = Remotes:WaitForChild("WaveSignal")
-local Knockback = Remotes:WaitForChild("Knockback")
-local WaveTimer = Remotes:WaitForChild("WaveTimer")
 
 local WaveEvent = {}
 
-local baseService = nil
-local spawner = nil
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
 
-function WaveEvent.init(context)
-	baseService = context.bases
-	spawner = context.spawner
-end
+local WALL_START_X = -115
+local WALL_END_X = 115
+local WALL_HEIGHT = 14
+local WALL_DEPTH = 240
+local KNOCKBACK = Vector3.new(70, 80, 0)
 
--- The wall: a tall semi-transparent blue sheet with eight wooden carts
--- spread along it. The sheet is the model's PrimaryPart, so PivotTo moves
--- the whole wall at once.
-local function buildWall()
-	local wall = Instance.new("Model")
-	wall.Name = "TsunamiWall"
-	local sheet = Instance.new("Part")
-	sheet.Name = "Sheet"
-	sheet.Size = Vector3.new(2, 14, 240)
-	sheet.CFrame = CFrame.new(-115, 7, 0)
-	sheet.Color = Color3.fromRGB(60, 140, 255)
-	sheet.Material = Enum.Material.Neon
-	sheet.Transparency = 0.4
-	sheet.Anchored = true
-	sheet.CanCollide = false
-	sheet.Parent = wall
-	wall.PrimaryPart = sheet
+-- The wall and its carts, each part recorded with its offset from the wall's x
+-- so the whole set can be slid across the market.
+local function buildWallParts()
+	local folder = Instance.new("Folder")
+	folder.Name = "TsunamiWall"
+	folder.Parent = Workspace
+	local parts = {}
+	local function add(props)
+		local part = Instance.new("Part")
+		part.Anchored = true
+		part.CanCollide = false
+		for name, value in pairs(props) do
+			part[name] = value
+		end
+		part.Parent = folder
+		local origin = props.CFrame
+		table.insert(parts, {
+			part = part,
+			ox = origin.Position.X,
+			y = origin.Position.Y,
+			z = origin.Position.Z,
+			rot = origin - origin.Position,
+		})
+		return part
+	end
+	add({
+		Name = "WaveWall",
+		Size = Vector3.new(2, WALL_HEIGHT, WALL_DEPTH),
+		CFrame = CFrame.new(0, WALL_HEIGHT / 2, 0),
+		Color = Color3.fromRGB(80, 160, 255),
+		Material = Enum.Material.Neon,
+		Transparency = 0.4,
+	})
 	for i = 1, 8 do
 		local z = -105 + (i - 1) * 30
-		local cart = Instance.new("Part")
-		cart.Name = "Cart" .. i
-		cart.Size = Vector3.new(4, 2, 3)
-		cart.CFrame = CFrame.new(-115, 1.5, z)
-		cart.Color = Color3.fromRGB(180, 120, 60)
-		cart.Material = Enum.Material.Wood
-		cart.Anchored = true
-		cart.CanCollide = false
-		cart.Parent = wall
-		for _, wheelZ in ipairs({ z - 1.2, z + 1.2 }) do
-			local wheel = Instance.new("Part")
-			wheel.Name = "Wheel"
-			wheel.Shape = Enum.PartType.Cylinder
-			wheel.Size = Vector3.new(0.4, 1.2, 1.2)
-			wheel.CFrame = CFrame.new(-115, 0.6, wheelZ)
-			wheel.Color = Color3.fromRGB(50, 45, 45)
-			wheel.Anchored = true
-			wheel.CanCollide = false
-			wheel.Parent = wall
+		add({
+			Name = "WaveCart",
+			Size = Vector3.new(3, 1.5, 2),
+			CFrame = CFrame.new(0, 1.5, z),
+			Color = Color3.fromRGB(170, 120, 70),
+			Material = Enum.Material.Wood,
+		})
+		for _, wx in ipairs({ -1.1, 1.1 }) do
+			for _, wz in ipairs({ -0.8, 0.8 }) do
+				add({
+					Name = "WaveCartWheel",
+					Shape = Enum.PartType.Cylinder,
+					Size = Vector3.new(0.4, 1, 1),
+					CFrame = CFrame.new(wx, 0.5, z + wz) * CFrame.Angles(0, math.rad(90), 0),
+					Color = Color3.fromRGB(50, 50, 55),
+					Material = Enum.Material.SmoothPlastic,
+				})
+			end
 		end
 	end
-	wall.Parent = workspace
-	return wall
+	return folder, parts
 end
 
-local function runWave()
-	WaveSignal:FireAllClients("warn", Config.Wave.WarnSecs)
-	Notify:FireAllClients("GEROBAK TSUNAMI DATANG! Lari ke lapakmu!", "info")
-	task.wait(Config.Wave.WarnSecs)
+local function moveParts(parts, x)
+	for _, entry in ipairs(parts) do
+		entry.part.CFrame = CFrame.new(x + entry.ox, entry.y, entry.z) * entry.rot
+	end
+end
 
-	WaveSignal:FireAllClients("wave", Config.Wave.SweepSecs)
-	local wall = buildWall()
-	local hitThisWave = {}
-	local speed = 230 / Config.Wave.SweepSecs
-	local x = -115
+local function sweep(remotes, baseService, spawner)
+	remotes.WaveSignal:FireAllClients("wave", Config.WAVE.SweepTime)
+	local folder, parts = buildWallParts()
+	local hit = {}
+	local startClock = os.clock()
+	local done = false
 	local connection
-	connection = RunService.Heartbeat:Connect(function(dt)
-		x = x + speed * dt
-		wall:PivotTo(CFrame.new(x, 7, 0))
+	connection = RunService.Heartbeat:Connect(function()
+		local t = (os.clock() - startClock) / Config.WAVE.SweepTime
+		if t >= 1 then
+			done = true
+			connection:Disconnect()
+			return
+		end
+		local x = WALL_START_X + (WALL_END_X - WALL_START_X) * t
+		moveParts(parts, x)
 		for _, player in ipairs(Players:GetPlayers()) do
-			if not hitThisWave[player] then
+			if not hit[player] then
 				local character = player.Character
 				local root = character and character:FindFirstChild("HumanoidRootPart")
-				if root then
-					local pos = root.Position
-					if math.abs(pos.X - x) < 3 and not baseService.isOnAnyBase(pos) then
-						hitThisWave[player] = true
-						Knockback:FireClient(player, Vector3.new(120, 90, 0))
-						local dropped = baseService.dropCarried(player)
-						for _, model in ipairs(dropped) do
-							spawner.returnToBelt(model)
-						end
-						Notify:FireClient(player, "Tsunami menghantammu! Brainrot-mu kembali ke konveyor.", "bad")
+				if root and math.abs(root.Position.X - x) < 4 and not baseService.isInAnyBase(root.Position) then
+					hit[player] = true
+					-- The fling is applied on the client: a server-set velocity on a
+					-- client-owned character is overwritten by the client's physics.
+					remotes.Knockback:FireClient(player, KNOCKBACK)
+					local dropped = baseService.dropAll(player)
+					for _, model in ipairs(dropped) do
+						spawner.returnToBelt(model)
 					end
+					remotes.Notify:FireClient(player, "Kamu kena Gerobak Tsunami!", "bad")
 				end
 			end
 		end
-		if x >= 115 then
-			connection:Disconnect()
-		end
 	end)
-	task.wait(Config.Wave.SweepSecs + 0.5)
-	if connection.Connected then
-		connection:Disconnect()
+	while not done do
+		task.wait(0.1)
 	end
-	wall:Destroy()
-	WaveSignal:FireAllClients("clear", 0)
+	folder:Destroy()
+	remotes.WaveSignal:FireAllClients("clear", 0)
 end
 
--- The countdown the HUD reads, then the wave, then the next countdown.
-function WaveEvent.start()
+function WaveEvent.start(remotes, baseService, spawner)
 	task.spawn(function()
-		local waitSecs = Config.Wave.FirstAt
+		local timer = remotes.WaveTimer
+		local delay = Config.WAVE.FirstDelay
 		while true do
-			for t = waitSecs, 1, -1 do
-				WaveTimer.Value = t
+			for i = delay, 0, -1 do
+				timer.Value = i
 				task.wait(1)
 			end
-			WaveTimer.Value = 0
-			runWave()
-			waitSecs = Config.Wave.Every
+			remotes.WaveSignal:FireAllClients("warn", Config.WAVE.WarnTime)
+			remotes.Notify:FireAllClients("GEROBAK TSUNAMI DATANG! Lari ke lapakmu!", "info")
+			task.wait(Config.WAVE.WarnTime)
+			sweep(remotes, baseService, spawner)
+			delay = Config.WAVE.Interval
 		end
 	end)
 end
